@@ -3,10 +3,11 @@ import type { Detection } from './types';
 
 const INPUT_SIZE = 640;
 const MAX_DETECTIONS = 300;
-const SCORE_THRESHOLD = 0.5;
+const SCORE_THRESHOLD = 0.3;
 
 let session: ort.InferenceSession | null = null;
 let activeBackend: 'webgpu' | 'wasm' | null = null;
+let loggedSample = false;
 
 ort.env.wasm.wasmPaths =
   'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.3/dist/';
@@ -14,7 +15,7 @@ ort.env.wasm.wasmPaths =
 export async function loadModel(): Promise<{ backend: 'webgpu' | 'wasm' }> {
   if (session && activeBackend) return { backend: activeBackend };
 
-  const modelUrl = '/models/yolov10n.onnx';
+  const modelUrl = '/models/yolov10n_fp16.onnx';
 
   try {
     session = await ort.InferenceSession.create(modelUrl, {
@@ -111,5 +112,24 @@ export async function detect(
   const inputName = session.inputNames[0];
   const results = await session.run({ [inputName]: tensor });
   const output = results[session.outputNames[0]].data as Float32Array;
+
+  if (!loggedSample) {
+    loggedSample = true;
+    const top = [];
+    for (let i = 0; i < 3; i++) {
+      const o = i * 6;
+      top.push({
+        x1: output[o].toFixed(2),
+        y1: output[o + 1].toFixed(2),
+        x2: output[o + 2].toFixed(2),
+        y2: output[o + 3].toFixed(2),
+        score: output[o + 4].toFixed(3),
+        class: Math.round(output[o + 5]),
+      });
+    }
+    console.log('[yolo] sample raw output (top 3 of 300):', top);
+    console.log('[yolo] meta:', meta);
+  }
+
   return postprocess(output, meta);
 }
