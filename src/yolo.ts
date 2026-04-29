@@ -110,26 +110,38 @@ export async function detect(
   const { input, meta } = preprocess(video, scratch);
   const tensor = new ort.Tensor('float32', input, [1, 3, INPUT_SIZE, INPUT_SIZE]);
   const inputName = session.inputNames[0];
-  const results = await session.run({ [inputName]: tensor });
-  const output = results[session.outputNames[0]].data as Float32Array;
 
-  if (!loggedSample) {
-    loggedSample = true;
-    const top = [];
-    for (let i = 0; i < 3; i++) {
-      const o = i * 6;
-      top.push({
-        x1: output[o].toFixed(2),
-        y1: output[o + 1].toFixed(2),
-        x2: output[o + 2].toFixed(2),
-        y2: output[o + 3].toFixed(2),
-        score: output[o + 4].toFixed(3),
-        class: Math.round(output[o + 5]),
-      });
+  let results: ort.InferenceSession.OnnxValueMapType | null = null;
+  try {
+    results = await session.run({ [inputName]: tensor });
+    const output = results[session.outputNames[0]].data as Float32Array;
+
+    if (!loggedSample) {
+      loggedSample = true;
+      const top = [];
+      for (let i = 0; i < 3; i++) {
+        const o = i * 6;
+        top.push({
+          x1: output[o].toFixed(2),
+          y1: output[o + 1].toFixed(2),
+          x2: output[o + 2].toFixed(2),
+          y2: output[o + 3].toFixed(2),
+          score: output[o + 4].toFixed(3),
+          class: Math.round(output[o + 5]),
+        });
+      }
+      console.log('[yolo] sample raw output (top 3 of 300):', top);
+      console.log('[yolo] meta:', meta);
     }
-    console.log('[yolo] sample raw output (top 3 of 300):', top);
-    console.log('[yolo] meta:', meta);
-  }
 
-  return postprocess(output, meta);
+    return postprocess(output, meta);
+  } finally {
+    tensor.dispose();
+    if (results) {
+      for (const name of session.outputNames) {
+        const t = results[name];
+        if (t && typeof t.dispose === 'function') t.dispose();
+      }
+    }
+  }
 }

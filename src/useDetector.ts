@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type RefObject } from 'react';
 import { detect, loadModel } from './yolo';
 import type { Detection } from './types';
 
-const TARGET_INTERVAL_MS = 100; // ~10 fps
+const TARGET_INTERVAL_MS = 200; // 5 fps (GPU breathing room)
 
 export function useDetector(opts: {
   videoRef: RefObject<HTMLVideoElement | null>;

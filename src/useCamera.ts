@@ -25,6 +25,16 @@ export function useCamera() {
         audio: false,
       });
       streamRef.current = stream;
+      stream.getTracks().forEach((t) => {
+        t.addEventListener('ended', () => {
+          console.warn('[camera] track ended:', t.kind, t.label);
+          setError('カメラが切断されました');
+          setActive(false);
+        });
+        t.addEventListener('mute', () => {
+          console.warn('[camera] track muted:', t.kind, t.label);
+        });
+      });
       const video = videoRef.current;
       if (video) {
         video.srcObject = stream;
