@@ -17,21 +17,28 @@ export async function loadModel(): Promise<{ backend: 'webgpu' | 'wasm' }> {
 
   const modelUrl = '/models/yolov10n_fp16.onnx';
 
-  try {
-    session = await ort.InferenceSession.create(modelUrl, {
-      executionProviders: ['webgpu'],
-      graphOptimizationLevel: 'all',
-    });
-    activeBackend = 'webgpu';
-  } catch (e) {
-    console.warn('WebGPU unavailable, falling back to WASM:', e);
-    session = await ort.InferenceSession.create(modelUrl, {
-      executionProviders: ['wasm'],
-      graphOptimizationLevel: 'all',
-    });
-    activeBackend = 'wasm';
+  const forceWasm =
+    typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).get('backend') === 'wasm';
+
+  if (!forceWasm) {
+    try {
+      session = await ort.InferenceSession.create(modelUrl, {
+        executionProviders: ['webgpu'],
+        graphOptimizationLevel: 'all',
+      });
+      activeBackend = 'webgpu';
+      return { backend: activeBackend };
+    } catch (e) {
+      console.warn('WebGPU unavailable, falling back to WASM:', e);
+    }
   }
 
+  session = await ort.InferenceSession.create(modelUrl, {
+    executionProviders: ['wasm'],
+    graphOptimizationLevel: 'all',
+  });
+  activeBackend = 'wasm';
   return { backend: activeBackend };
 }
 
