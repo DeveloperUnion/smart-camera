@@ -2,7 +2,15 @@ import { useEffect, useRef, useState, type RefObject } from 'react';
 import { detect, loadModel } from './yolo';
 import type { Detection } from './types';
 
-const TARGET_INTERVAL_MS = 333; // 3 fps (battery + memory)
+const DEFAULT_INTERVAL_MS = 333; // 3 fps (battery + memory)
+
+function readIntervalOverride(): number {
+  if (typeof window === 'undefined') return DEFAULT_INTERVAL_MS;
+  const fpsParam = new URLSearchParams(window.location.search).get('fps');
+  const fps = fpsParam ? Number(fpsParam) : NaN;
+  if (Number.isFinite(fps) && fps > 0) return Math.round(1000 / fps);
+  return DEFAULT_INTERVAL_MS;
+}
 
 export function useDetector(opts: {
   videoRef: RefObject<HTMLVideoElement | null>;
@@ -53,9 +61,11 @@ export function useDetector(opts: {
       });
     }, 1000);
 
+    const intervalMs = readIntervalOverride();
+
     const loop = async (ts: number) => {
       if (stopped) return;
-      if (!inFlight && ts - lastRun >= TARGET_INTERVAL_MS) {
+      if (!inFlight && ts - lastRun >= intervalMs) {
         inFlight = true;
         lastRun = ts;
         try {
