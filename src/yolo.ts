@@ -1,7 +1,7 @@
 import * as ort from 'onnxruntime-web/webgpu';
 import type { Detection } from './types';
 
-const INPUT_SIZE = 416;
+const INPUT_SIZE = 640;
 const MAX_DETECTIONS = 300;
 const SCORE_THRESHOLD = 0.3;
 
