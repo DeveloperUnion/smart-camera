@@ -1,13 +1,15 @@
 import * as ort from 'onnxruntime-web/webgpu';
 import type { Detection } from './types';
 
-const INPUT_SIZE = 640;
+const INPUT_SIZE = 416;
 const MAX_DETECTIONS = 300;
 const SCORE_THRESHOLD = 0.3;
 
 let session: ort.InferenceSession | null = null;
 let activeBackend: 'webgpu' | 'wasm' | null = null;
 let loggedSample = false;
+
+const inputBuffer = new Float32Array(3 * INPUT_SIZE * INPUT_SIZE);
 
 ort.env.wasm.wasmPaths =
   'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.3/dist/';
@@ -53,7 +55,7 @@ type Meta = {
 function preprocess(
   video: HTMLVideoElement,
   scratch: HTMLCanvasElement,
-): { input: Float32Array; meta: Meta } {
+): Meta {
   const vw = video.videoWidth;
   const vh = video.videoHeight;
   const scale = INPUT_SIZE / Math.max(vw, vh);
@@ -70,15 +72,14 @@ function preprocess(
   ctx.drawImage(video, 0, 0, vw, vh, padX, padY, newW, newH);
 
   const { data } = ctx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE);
-  const input = new Float32Array(3 * INPUT_SIZE * INPUT_SIZE);
   const stride = INPUT_SIZE * INPUT_SIZE;
   for (let i = 0, j = 0; i < data.length; i += 4, j++) {
-    input[j] = data[i] / 255;
-    input[j + stride] = data[i + 1] / 255;
-    input[j + 2 * stride] = data[i + 2] / 255;
+    inputBuffer[j] = data[i] / 255;
+    inputBuffer[j + stride] = data[i + 1] / 255;
+    inputBuffer[j + 2 * stride] = data[i + 2] / 255;
   }
 
-  return { input, meta: { scale, padX, padY, vw, vh } };
+  return { scale, padX, padY, vw, vh };
 }
 
 function postprocess(output: Float32Array, meta: Meta): Detection[] {
@@ -114,8 +115,8 @@ export async function detect(
   if (!session) throw new Error('Model not loaded');
   if (!video.videoWidth) return [];
 
-  const { input, meta } = preprocess(video, scratch);
-  const tensor = new ort.Tensor('float32', input, [1, 3, INPUT_SIZE, INPUT_SIZE]);
+  const meta = preprocess(video, scratch);
+  const tensor = new ort.Tensor('float32', inputBuffer, [1, 3, INPUT_SIZE, INPUT_SIZE]);
   const inputName = session.inputNames[0];
 
   let results: ort.InferenceSession.OnnxValueMapType | null = null;

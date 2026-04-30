@@ -11,6 +11,10 @@ type Flash = { bbox: [number, number, number, number]; expiry: number };
 
 const FLASH_MS = 700;
 
+const DEBUG =
+  typeof window !== 'undefined' &&
+  new URLSearchParams(window.location.search).get('debug') === '1';
+
 export default function App() {
   const [phase, setPhase] = useState<Phase>('idle');
   const [cart, setCart] = useState<Map<number, number>>(new Map());
@@ -197,6 +201,17 @@ export default function App() {
             停止
           </button>
           {camera.error && <div className="error">{camera.error}</div>}
+          {DEBUG && (
+            <div className="debug">
+              <div>backend: {detector.backend ?? '—'}</div>
+              <div>track: {camera.trackState}</div>
+              <div>infs: {detector.stats.inferences}</div>
+              <div>dets: {detector.detections.length}</div>
+              {detector.stats.lastError && (
+                <div className="debug-err">err: {detector.stats.lastError}</div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
