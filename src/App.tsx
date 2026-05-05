@@ -27,6 +27,9 @@ export default function App() {
     enabled: phase === 'running',
   });
 
+  const detectionsRef = useRef<Detection[]>([]);
+  detectionsRef.current = detector.detections;
+
   useEffect(() => {
     if (phase !== 'running') return;
     const canvas = overlayRef.current;
@@ -51,7 +54,7 @@ export default function App() {
       ctx.setLineDash([6, 4]);
       ctx.font = '16px system-ui, -apple-system, sans-serif';
 
-      for (const d of detector.detections) {
+      for (const d of detectionsRef.current) {
         const [x1, y1, x2, y2] = d.bbox;
         ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
         const text = labelOf(d.classId);
@@ -79,7 +82,7 @@ export default function App() {
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
-  }, [phase, detector.detections, camera.videoRef]);
+  }, [phase, camera.videoRef]);
 
   const handleTap = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = overlayRef.current;
