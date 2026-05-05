@@ -57,6 +57,8 @@ export async function loadModel(): Promise<{ backend: 'webgpu' | 'wasm' }> {
 
 type Meta = { vw: number; vh: number };
 
+let scratchCtx: CanvasRenderingContext2D | null = null;
+
 // D-FINE / RT-DETR uses anisotropic resize to 640x640 (do_pad: false),
 // rescale by 1/255, no mean/std normalization.
 function preprocess(
@@ -66,12 +68,18 @@ function preprocess(
   const vw = video.videoWidth;
   const vh = video.videoHeight;
 
-  scratch.width = INPUT_SIZE;
-  scratch.height = INPUT_SIZE;
-  const ctx = scratch.getContext('2d', { willReadFrequently: true })!;
+  if (!scratchCtx || scratchCtx.canvas !== scratch) {
+    scratch.width = INPUT_SIZE;
+    scratch.height = INPUT_SIZE;
+    scratchCtx = scratch.getContext('2d', { willReadFrequently: true })!;
+  }
+  const ctx = scratchCtx;
   ctx.drawImage(video, 0, 0, INPUT_SIZE, INPUT_SIZE);
 
-  const { data } = ctx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE);
+  // getImageData allocates a fresh ~1.6MB Uint8ClampedArray each call. On
+  // mobile Safari the GC can't keep up at 3fps and the tab gets killed under
+  // memory pressure. Skip the ImageData wrapper entirely.
+  const data = ctx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
   const stride = INPUT_SIZE * INPUT_SIZE;
   for (let i = 0, j = 0; i < data.length; i += 4, j++) {
     inputBuffer[j] = data[i] / 255;

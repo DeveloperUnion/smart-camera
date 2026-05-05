@@ -22,8 +22,11 @@ export function useCamera() {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: 'environment' },
-          width: { ideal: 640 },
-          height: { ideal: 480 },
+          // Lower than the model's 640 input — preprocess scales up anyway, and
+          // iOS allocates a video frame pool sized to the requested resolution.
+          width: { ideal: 480 },
+          height: { ideal: 360 },
+          frameRate: { ideal: 15, max: 24 },
         },
         audio: false,
       });

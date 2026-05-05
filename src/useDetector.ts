@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type RefObject } from 'react';
 import { detect, loadModel } from './dfine';
 import type { Detection } from './types';
 
-const DEFAULT_INTERVAL_MS = 333; // 3 fps (battery + memory)
+const DEFAULT_INTERVAL_MS = 500; // 2 fps (battery + memory)
 
 function readIntervalOverride(): number {
   if (typeof window === 'undefined') return DEFAULT_INTERVAL_MS;
