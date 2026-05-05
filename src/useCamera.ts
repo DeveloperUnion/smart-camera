@@ -3,9 +3,16 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 export type CameraTrackState = 'unknown' | 'live' | 'muted' | 'ended';
 
 export function useCamera() {
-  const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
+  // Callback ref: tracks the currently-mounted <video> element across
+  // mounts/unmounts (idle → preview → recording → review all involve different
+  // <video> elements). State-backed so the attachment effect re-runs.
+  const [videoEl, setVideoEl] = useState<HTMLVideoElement | null>(null);
+  const videoRef = useCallback((el: HTMLVideoElement | null) => {
+    setVideoEl(el);
+  }, []);
+
   const [active, setActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [trackState, setTrackState] = useState<CameraTrackState>('unknown');
@@ -14,8 +21,8 @@ export function useCamera() {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     setStream(null);
-    if (videoRef.current) videoRef.current.srcObject = null;
     setActive(false);
+    setTrackState('unknown');
   }, []);
 
   const start = useCallback(async () => {
@@ -48,21 +55,32 @@ export function useCamera() {
           setTrackState('live');
         });
       });
-      const video = videoRef.current;
-      if (video) {
-        video.srcObject = s;
-        try {
-          await video.play();
-        } catch {
-          // play() can reject if interrupted; ignore
-        }
-      }
       setActive(true);
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'カメラ起動に失敗しました';
       setError(msg);
     }
   }, []);
+
+  // Reactively attach the stream to whichever <video> element is currently
+  // mounted. Re-runs when either changes, so swapping between preview and
+  // recording phases (different <video> elements with the same ref callback)
+  // keeps the feed alive without manually re-attaching.
+  useEffect(() => {
+    if (!videoEl) return;
+    if (stream) {
+      // setting srcObject to the same stream is a no-op in modern browsers,
+      // but be defensive.
+      if (videoEl.srcObject !== stream) {
+        videoEl.srcObject = stream;
+      }
+      // autoPlay handles this in most cases; explicit play() is a safety net
+      // for browsers that pause when srcObject is reassigned.
+      videoEl.play().catch(() => {});
+    } else {
+      videoEl.srcObject = null;
+    }
+  }, [videoEl, stream]);
 
   useEffect(() => {
     return () => stop();

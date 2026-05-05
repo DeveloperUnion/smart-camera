@@ -372,6 +372,11 @@ button.primary:disabled {
   transform: translateX(-50%) scale(0.95);
 }
 
+.shutter:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .shutter-inner {
   width: 60px;
   height: 60px;

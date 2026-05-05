@@ -352,17 +352,25 @@ export default function App() {
           >
             ×
           </button>
-          <div className="preview-tip">
-            準備ができたら録画ボタンを押してください
-            <br />
-            <span className="preview-tip-sub">
-              最大 10 秒。カメラはゆっくり動かしてください
-            </span>
-          </div>
+          {!camera.active && !camera.error && (
+            <div className="preview-tip">
+              カメラ起動中…
+            </div>
+          )}
+          {camera.active && (
+            <div className="preview-tip">
+              準備ができたら録画ボタンを押してください
+              <br />
+              <span className="preview-tip-sub">
+                最大 10 秒。カメラはゆっくり動かしてください
+              </span>
+            </div>
+          )}
           <button
             className="shutter"
             onClick={handleShutter}
             aria-label="録画開始"
+            disabled={!camera.active}
           >
             <span className="shutter-inner" />
           </button>
