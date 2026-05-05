@@ -6,7 +6,13 @@ import { activeBoxesAt } from './playbackOverlay';
 import type { Detection } from './types';
 import './App.css';
 
-type Phase = 'idle' | 'recording' | 'analyzing' | 'review' | 'cart';
+type Phase =
+  | 'idle'
+  | 'preview' // camera live, waiting for the user to hit the shutter
+  | 'recording'
+  | 'analyzing'
+  | 'review'
+  | 'cart';
 
 type Flash = { bbox: [number, number, number, number]; expiry: number };
 
@@ -27,8 +33,10 @@ export default function App() {
   // Refs for the live preview (recording) and playback (review).
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const reviewVideoRef = useRef<HTMLVideoElement>(null);
+  const progressFillRef = useRef<HTMLDivElement>(null);
   const recordedUrlRef = useRef<string | null>(null);
   const [recordedUrl, setRecordedUrl] = useState<string | null>(null);
+  const [isVideoPaused, setIsVideoPaused] = useState(true);
 
   const camera = useCamera();
   const recorder = useRecorder(camera.stream);
@@ -42,16 +50,25 @@ export default function App() {
   cartRef.current = cart;
 
   const handleStart = useCallback(async () => {
-    setPhase('recording');
+    setPhase('preview');
     if (!camera.active) {
       await camera.start();
     }
   }, [camera]);
 
-  // Once camera becomes active during recording phase, kick off the recorder.
-  // The recorder.start() promise resolves when recording finishes.
+  const handleShutter = useCallback(() => {
+    setPhase('recording');
+  }, []);
+
+  const handleCancelPreview = useCallback(() => {
+    camera.stop();
+    setPhase('idle');
+  }, [camera]);
+
+  // Once we enter 'recording', kick off the MediaRecorder. Camera is already
+  // active (the user reached this phase via 'preview').
   useEffect(() => {
-    if (phase !== 'recording' || !camera.active || recorder.recording) return;
+    if (phase !== 'recording' || recorder.recording) return;
     let cancelled = false;
     (async () => {
       const result = await recorder.start();
@@ -68,18 +85,15 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-    // We intentionally only react to phase + camera.active here.
+    // We intentionally only react to phase here.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, camera.active]);
+  }, [phase]);
 
-  // When analysis finishes, transition to review.
+  // When analysis finishes, land on review with the video paused at frame 0.
   useEffect(() => {
     if (phase === 'analyzing' && detector.status === 'done') {
+      setIsVideoPaused(true);
       setPhase('review');
-      // Auto-play once we land on review.
-      requestAnimationFrame(() => {
-        reviewVideoRef.current?.play().catch(() => {});
-      });
     }
   }, [phase, detector.status]);
 
@@ -149,6 +163,13 @@ export default function App() {
       for (const f of flashesRef.current) {
         const [x1, y1, x2, y2] = f.bbox;
         ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      }
+
+      // Update playback progress bar via direct DOM (avoid per-frame
+      // re-renders).
+      const fill = progressFillRef.current;
+      if (fill && video.duration > 0) {
+        fill.style.transform = `scaleX(${Math.min(1, t / video.duration)})`;
       }
 
       raf = requestAnimationFrame(draw);
@@ -228,6 +249,20 @@ export default function App() {
     recorder.stop();
   }, [recorder]);
 
+  const handleTogglePlay = useCallback(() => {
+    const video = reviewVideoRef.current;
+    if (!video) return;
+    if (video.paused) video.play().catch(() => {});
+    else video.pause();
+  }, []);
+
+  const handleRestart = useCallback(() => {
+    const video = reviewVideoRef.current;
+    if (!video) return;
+    video.currentTime = 0;
+    video.play().catch(() => {});
+  }, []);
+
   const handleFinishReview = useCallback(() => {
     if (recordedUrlRef.current) {
       URL.revokeObjectURL(recordedUrlRef.current);
@@ -301,6 +336,40 @@ export default function App() {
         </div>
       )}
 
+      {phase === 'preview' && (
+        <div className="screen running">
+          <video
+            ref={camera.videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="video"
+          />
+          <button
+            className="back-btn"
+            onClick={handleCancelPreview}
+            aria-label="戻る"
+          >
+            ×
+          </button>
+          <div className="preview-tip">
+            準備ができたら録画ボタンを押してください
+            <br />
+            <span className="preview-tip-sub">
+              最大 10 秒。カメラはゆっくり動かしてください
+            </span>
+          </div>
+          <button
+            className="shutter"
+            onClick={handleShutter}
+            aria-label="録画開始"
+          >
+            <span className="shutter-inner" />
+          </button>
+          {camera.error && <div className="error">{camera.error}</div>}
+        </div>
+      )}
+
       {phase === 'recording' && (
         <div className="screen running">
           <video
@@ -317,8 +386,12 @@ export default function App() {
             className="rec-progress"
             style={{ transform: `scaleX(${recordingProgress})` }}
           />
-          <button className="stop" onClick={handleStopRecording}>
-            停止
+          <button
+            className="shutter recording"
+            onClick={handleStopRecording}
+            aria-label="録画停止"
+          >
+            <span className="shutter-inner" />
           </button>
           {camera.error && <div className="error">{camera.error}</div>}
         </div>
@@ -352,15 +425,41 @@ export default function App() {
             ref={reviewVideoRef}
             src={recordedUrl}
             playsInline
-            loop
             controls={false}
             className="video"
+            onPlay={() => setIsVideoPaused(false)}
+            onPause={() => setIsVideoPaused(true)}
+            onEnded={() => setIsVideoPaused(true)}
           />
           <canvas
             ref={overlayRef}
             className="overlay"
             onPointerDown={handleTap}
           />
+          {isVideoPaused && (
+            <div className="play-icon" aria-hidden="true">
+              ▶
+            </div>
+          )}
+          <div className="player-controls">
+            <button
+              className="player-btn"
+              onClick={handleTogglePlay}
+              aria-label={isVideoPaused ? '再生' : '一時停止'}
+            >
+              {isVideoPaused ? '▶' : '❚❚'}
+            </button>
+            <div className="player-progress">
+              <div ref={progressFillRef} className="player-progress-fill" />
+            </div>
+            <button
+              className="player-btn"
+              onClick={handleRestart}
+              aria-label="最初から"
+            >
+              ↻
+            </button>
+          </div>
           <div className="badge">🛒 {cartCount}</div>
           <button className="stop" onClick={handleFinishReview}>
             終了
