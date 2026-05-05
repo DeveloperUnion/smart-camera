@@ -46,7 +46,7 @@
 | 最大録画時間 | 15 秒 |
 | 録画解像度 | 640×480 (`getUserMedia` ideal) |
 | 録画ビットレート | 800 kbps |
-| Gemini モデル | `gemini-3-flash` |
+| Gemini モデル | `gemini-3-flash-preview` |
 | Gemini thinkingBudget | 0 (検知タスクは推論不要、レイテンシ優先) |
 | Bbox active window | 動画 currentTime ±0.6s 内の appearance を表示対象 |
 
