@@ -1,9 +1,8 @@
 # SmartCamera
 
-スマホブラウザで動く、リアルタイム物体検知 + カゴ追加アプリ。
+スマホブラウザで動く、動画ベースの物体検知 + カゴ追加アプリ。
 
-カメラを起動 → 写った物体に枠が出る → タップでカゴに追加 → 停止後にカゴから削除可能。
-推論はオンデバイス (WebGPU / WASM) で完結し、映像は外部に送信されません。
+最大 15 秒の動画を撮影 → Gemini 3 Flash が全フレームを解析 → 動画再生に同期して bbox が表示される → タップでカゴに追加。
 
 仕様の詳細は [SPEC.md](./SPEC.md) を参照。
 
@@ -11,45 +10,63 @@
 
 ```bash
 npm install
-npm run dev
 ```
 
-モデルファイル (`public/models/yolov10n.onnx`, ~2.6MB) はリポジトリにコミット済みなので追加 DL 不要。
-失われた場合は `./scripts/download-model.sh` で再取得できます。
+### 環境変数
 
-`localhost` は `getUserMedia` が許可されますが、スマホ実機で確認するときは:
-- `npm run dev -- --host` でネットワーク公開
-- HTTPS が必要なら `vite-plugin-mkcert` を入れるか、Vercel preview URL で確認
+`GEMINI_API_KEY` が必須。[Google AI Studio](https://aistudio.google.com/apikey) で発行。
 
-## ビルド & デプロイ (Vercel)
+ローカル開発時はリポジトリ直下に `.env.local` を作成:
+
+```
+GEMINI_API_KEY=AIza...
+```
+
+Vercel デプロイでは Project Settings → Environment Variables に同名で登録。
+
+### ローカル実行
+
+API ルート (`/api/detect-video`) を含めて動かすには Vercel CLI を使う:
+
+```bash
+npx vercel dev
+```
+
+UI だけで API 不要なら `npm run dev` でも起動できるが、撮影後の解析でエラーになる。
+
+スマホ実機で動作確認するときは:
+- `npx vercel dev --listen 0.0.0.0:3000` でネットワーク公開
+- HTTPS が必要なら Vercel preview URL に push してそちらで確認するのが早い (`getUserMedia` は HTTPS 必須)
+
+## ビルド & デプロイ
 
 ```bash
 npm run build      # → dist/
 ```
 
-Vercel に Git push すれば自動検出されます (Framework: Vite)。
+Vercel に Git push すれば自動デプロイ (Framework: Vite、Functions: `api/`)。
 
 ## ファイル構成
 
 ```
+api/
+└── detect-video.ts        Vercel Function (Gemini 3 Flash 呼び出し)
 src/
-├── App.tsx           状態遷移 (idle → running → stopped) + 描画 + タップ判定
-├── App.css           スタイル
-├── coco-labels.ts    COCO 80 → 日本語マッピング
-├── types.ts          Detection 型
-├── useCamera.ts      getUserMedia フック
-├── useDetector.ts    onnxruntime-web 推論ループ (~10fps)
-├── yolo.ts           前処理 (letterbox + 1/255) / 推論 / 後処理
+├── App.tsx                idle → recording → analyzing → review → cart の状態遷移
+├── App.css                スタイル
+├── types.ts               Detection / Appearance 型
+├── useCamera.ts           getUserMedia + MediaStream 管理
+├── useRecorder.ts         MediaRecorder ラッパー (15s auto-stop)
+├── useVideoDetector.ts    /api/detect-video を叩いて結果を返すフック
+├── playbackOverlay.ts     currentTime に対する bbox 補間 (純関数)
 ├── index.css
 └── main.tsx
-public/
-└── models/yolov10n.onnx   YOLOv10n uint8 量子化 ONNX (~2.6MB, コミット済み)
 ```
 
 ## 技術メモ
 
-- 推論ランタイム: `onnxruntime-web` (WebGPU 優先、WASM SIMD フォールバック)
-- WASM ファイルは jsDelivr CDN (`@1.24.3`) から実行時に取得
-- モデル: YOLOv10n は NMS-free 出力 `[1, 300, 6]` = `[x1, y1, x2, y2, score, class]`
-- 信頼度閾値 0.5、推論間隔 100ms (約 10fps)
-- 入力: 640×640 にレターボックス + 1/255 で正規化のみ
+- 推論はクラウド (Gemini 3 Flash) に丸投げするため、クライアントは onnxruntime や WebGPU 不要
+- 録画形式は `MediaRecorder.isTypeSupported` で iOS は mp4/H.264、Android は webm/VP9 を選択
+- 動画 Blob は base64 化して inline で Gemini に送信 (15s × 800kbps ≒ 1.5MB、Gemini inline 上限 20MB 内)
+- 同一物体の追跡は Gemini プロンプトで `instance_id` (整数) を明示要求し、クライアントはそれを信用してカゴ重複排除に使う
+- bbox は時刻 `time_s` 付きで返ってくるため、動画再生時刻に応じて線形補間して overlay 表示

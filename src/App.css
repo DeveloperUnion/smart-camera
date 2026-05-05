@@ -225,3 +225,118 @@ button.primary:disabled {
   border-color: #ef4444;
   background: rgba(239, 68, 68, 0.1);
 }
+
+/* Recording-state UI */
+.rec-indicator {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 16px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  padding: 8px 16px;
+  border-radius: 100px;
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  z-index: 5;
+}
+
+.rec-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 100px;
+  background: #ef4444;
+  animation: rec-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes rec-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.rec-progress {
+  position: absolute;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 92px);
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: #ef4444;
+  transform-origin: left;
+  transition: transform 0.1s linear;
+  z-index: 5;
+}
+
+/* Analyzing-state overlay */
+.analyzing-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  z-index: 6;
+}
+
+.spinner {
+  width: 56px;
+  height: 56px;
+  border-radius: 100px;
+  border: 3px solid rgba(255, 255, 255, 0.2);
+  border-top-color: #3b82f6;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.analyzing-text {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.analyzing-sub {
+  font-size: 13px;
+  color: #a0a0a0;
+}
+
+/* Error screen */
+.error-screen {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  gap: 16px;
+  text-align: center;
+  background: #0a0a0a;
+  z-index: 10;
+}
+
+.error-screen p {
+  margin: 0;
+}
+
+/* Inline retry button on review error */
+.error .retry {
+  margin-left: 12px;
+  background: #fff;
+  color: #b91c1c;
+  border: none;
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
