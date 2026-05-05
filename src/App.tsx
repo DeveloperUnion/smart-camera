@@ -289,7 +289,10 @@ export default function App() {
         <div className="screen idle">
           <h1>SmartCamera</h1>
           <p className="lead">
-            最大 15 秒の動画を撮影 → AI が物体を検出 → 動画を見ながらタップでカゴに追加。
+            最大 10 秒の動画を撮影 → AI が物体を検出 → 動画を見ながらタップでカゴに追加。
+          </p>
+          <p className="lead lead-tip">
+            ヒント: カメラはゆっくり動かしてください (速いとブレで検出精度が落ちます)。
           </p>
           {camera.error && <div className="status err">{camera.error}</div>}
           <button className="primary" onClick={handleStart}>
@@ -337,7 +340,7 @@ export default function App() {
             <div className="analyzing-sub">
               {detector.status === 'uploading'
                 ? 'アップロード中'
-                : 'Gemini で物体を検出中 (5〜15秒)'}
+                : 'Gemini で物体を検出中 (5〜15 秒)'}
             </div>
           </div>
         </div>

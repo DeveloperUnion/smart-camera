@@ -2,7 +2,7 @@
 
 スマホブラウザで動く、動画ベースの物体検知 + カゴ追加アプリ。
 
-最大 15 秒の動画を撮影 → Gemini 3 Flash が全フレームを解析 → 動画再生に同期して bbox が表示される → タップでカゴに追加。
+最大 10 秒の動画を撮影 → Gemini 3 Flash が全フレームを解析 → 動画再生に同期して bbox が表示される → タップでカゴに追加。
 
 仕様の詳細は [SPEC.md](./SPEC.md) を参照。
 
@@ -56,7 +56,7 @@ src/
 ├── App.css                スタイル
 ├── types.ts               Detection / Appearance 型
 ├── useCamera.ts           getUserMedia + MediaStream 管理
-├── useRecorder.ts         MediaRecorder ラッパー (15s auto-stop)
+├── useRecorder.ts         MediaRecorder ラッパー (10s auto-stop)
 ├── useVideoDetector.ts    /api/detect-video を叩いて結果を返すフック
 ├── playbackOverlay.ts     currentTime に対する bbox 補間 (純関数)
 ├── index.css
@@ -67,6 +67,7 @@ src/
 
 - 推論はクラウド (Gemini 3 Flash) に丸投げするため、クライアントは onnxruntime や WebGPU 不要
 - 録画形式は `MediaRecorder.isTypeSupported` で iOS は mp4/H.264、Android は webm/VP9 を選択
-- 動画 Blob は base64 化して inline で Gemini に送信 (15s × 800kbps ≒ 1.5MB、Gemini inline 上限 20MB 内)
+- 動画 Blob は base64 化して inline で Gemini に送信 (10s × 800kbps ≒ 1MB、Gemini inline 上限 20MB 内)
+- Gemini 側の動画サンプリングは既定 1 fps だと取りこぼしが多いので、`videoMetadata.fps = 4` で密に見させる
 - 同一物体の追跡は Gemini プロンプトで `instance_id` (整数) を明示要求し、クライアントはそれを信用してカゴ重複排除に使う
 - bbox は時刻 `time_s` 付きで返ってくるため、動画再生時刻に応じて線形補間して overlay 表示

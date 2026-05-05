@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-export const MAX_DURATION_MS = 15_000;
+export const MAX_DURATION_MS = 10_000;
 
 const PREFERRED_TYPES = [
   // iOS Safari emits MP4/H.264 directly. Prefer this when available so we

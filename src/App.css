@@ -54,6 +54,12 @@ body,
   line-height: 1.6;
 }
 
+.lead.lead-tip {
+  font-size: 13px;
+  color: #6b7280;
+  margin-top: -8px;
+}
+
 .status {
   font-size: 14px;
   color: #888;
