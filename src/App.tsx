@@ -20,7 +20,6 @@ type Phase =
 type Flash = { bbox: [number, number, number, number]; expiry: number };
 
 const FLASH_MS = 700;
-const MODE_KEY = 'smartcamera.mode';
 
 const DEBUG =
   typeof window !== 'undefined' &&
@@ -28,14 +27,8 @@ const DEBUG =
 
 type CartEntry = { instance_id: number; label: string };
 
-function readSavedMode(): Mode {
-  if (typeof window === 'undefined') return 'cloud';
-  const v = window.localStorage.getItem(MODE_KEY);
-  return v === 'local' ? 'local' : 'cloud';
-}
-
 export default function App() {
-  const [mode, setMode] = useState<Mode>(readSavedMode);
+  const [mode, setMode] = useState<Mode>('cloud');
   const [phase, setPhase] = useState<Phase>('idle');
   // Cart keyed by instance_id (cloud) or a fresh counter id (local) so that
   // tapping the same physical object twice doesn't double-count, while
@@ -71,9 +64,6 @@ export default function App() {
 
   const handleSetMode = useCallback((m: Mode) => {
     setMode(m);
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem(MODE_KEY, m);
-    }
   }, []);
 
   const handleStart = useCallback(async () => {
