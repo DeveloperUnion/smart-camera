@@ -446,6 +446,7 @@ export default function App() {
     <div className="app">
       {phase === 'idle' && (
         <div className="screen idle">
+          <img src="/dustalk-logo.png" alt="Dustalk" className="dustalk-logo" />
           <h1>SmartCamera</h1>
           <p className="lead">
             {mode === 'cloud'
@@ -460,8 +461,7 @@ export default function App() {
               onClick={() => handleSetMode('cloud')}
               aria-selected={mode === 'cloud'}
             >
-              ☁️ クラウド
-              <span className="mode-sub">動画解析・任意物体</span>
+              クラウド
             </button>
             <button
               role="tab"
@@ -469,8 +469,7 @@ export default function App() {
               onClick={() => handleSetMode('local')}
               aria-selected={mode === 'local'}
             >
-              📱 ローカル
-              <span className="mode-sub">リアルタイム・80 種</span>
+              ローカル
             </button>
           </div>
 
@@ -485,7 +484,7 @@ export default function App() {
           {camera.error && <div className="status err">{camera.error}</div>}
 
           <button className="primary" onClick={handleStart}>
-            {mode === 'cloud' ? '📹 撮影開始' : '📷 カメラ開始'}
+            {mode === 'cloud' ? '撮影開始' : 'カメラ開始'}
           </button>
         </div>
       )}
