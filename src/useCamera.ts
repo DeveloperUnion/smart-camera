@@ -86,5 +86,5 @@ export function useCamera() {
     return () => stop();
   }, [stop]);
 
-  return { videoRef, start, stop, stream, active, error, trackState };
+  return { videoRef, videoEl, start, stop, stream, active, error, trackState };
 }

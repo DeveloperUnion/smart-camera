@@ -2,21 +2,25 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useCamera } from './useCamera';
 import { useRecorder, MAX_DURATION_MS } from './useRecorder';
 import { useVideoDetector } from './useVideoDetector';
+import { useLocalDetector } from './useLocalDetector';
 import { activeBoxesAt } from './playbackOverlay';
-import type { Detection } from './types';
+import type { Detection, LiveBox } from './types';
 import './App.css';
 
+type Mode = 'cloud' | 'local';
 type Phase =
   | 'idle'
-  | 'preview' // camera live, waiting for the user to hit the shutter
+  | 'preview' // cloud: live camera awaiting shutter
   | 'recording'
   | 'analyzing'
   | 'review'
+  | 'live' // local: live camera + on-device inference + tap-to-add
   | 'cart';
 
 type Flash = { bbox: [number, number, number, number]; expiry: number };
 
 const FLASH_MS = 700;
+const MODE_KEY = 'smartcamera.mode';
 
 const DEBUG =
   typeof window !== 'undefined' &&
@@ -24,13 +28,23 @@ const DEBUG =
 
 type CartEntry = { instance_id: number; label: string };
 
+function readSavedMode(): Mode {
+  if (typeof window === 'undefined') return 'cloud';
+  const v = window.localStorage.getItem(MODE_KEY);
+  return v === 'local' ? 'local' : 'cloud';
+}
+
 export default function App() {
+  const [mode, setMode] = useState<Mode>(readSavedMode);
   const [phase, setPhase] = useState<Phase>('idle');
-  // Map keyed by instance_id so the same physical object can't be added twice.
+  // Cart keyed by instance_id (cloud) or a fresh counter id (local) so that
+  // tapping the same physical object twice doesn't double-count, while
+  // distinct instances of the same label aggregate as count.
   const [cart, setCart] = useState<Map<number, CartEntry>>(new Map());
   const flashesRef = useRef<Flash[]>([]);
+  const localInstanceCounterRef = useRef(0);
 
-  // Refs for the live preview (recording) and playback (review).
+  // Refs for the live preview/recording (camera) and playback (review).
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const reviewVideoRef = useRef<HTMLVideoElement>(null);
   const progressFillRef = useRef<HTMLDivElement>(null);
@@ -41,20 +55,34 @@ export default function App() {
   const camera = useCamera();
   const recorder = useRecorder(camera.stream);
   const detector = useVideoDetector();
+  const localDetector = useLocalDetector({
+    videoEl: camera.videoEl,
+    enabled: mode === 'local' && phase === 'live',
+  });
 
-  // Latest detections via ref so the playback rAF loop can read without
+  // Latest results via ref so the playback rAF loop can read without
   // re-binding on every state update.
   const detectionsRef = useRef<Detection[]>([]);
   detectionsRef.current = detector.detections;
+  const localBoxesRef = useRef<LiveBox[]>([]);
+  localBoxesRef.current = localDetector.boxes;
   const cartRef = useRef(cart);
   cartRef.current = cart;
 
+  const handleSetMode = useCallback((m: Mode) => {
+    setMode(m);
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(MODE_KEY, m);
+    }
+  }, []);
+
   const handleStart = useCallback(async () => {
-    setPhase('preview');
+    if (mode === 'cloud') setPhase('preview');
+    else setPhase('live');
     if (!camera.active) {
       await camera.start();
     }
-  }, [camera]);
+  }, [mode, camera]);
 
   const handleShutter = useCallback(() => {
     setPhase('recording');
@@ -65,15 +93,13 @@ export default function App() {
     setPhase('idle');
   }, [camera]);
 
-  // Once we enter 'recording', kick off the MediaRecorder. Camera is already
-  // active (the user reached this phase via 'preview').
+  // Cloud: drive the MediaRecorder + analysis pipeline from 'recording'.
   useEffect(() => {
     if (phase !== 'recording' || recorder.recording) return;
     let cancelled = false;
     (async () => {
       const result = await recorder.start();
       if (cancelled || !result) return;
-      // Camera no longer needed — free it before playback.
       camera.stop();
       const url = URL.createObjectURL(result.blob);
       if (recordedUrlRef.current) URL.revokeObjectURL(recordedUrlRef.current);
@@ -85,11 +111,9 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-    // We intentionally only react to phase here.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
 
-  // When analysis finishes, land on review with the video paused at frame 0.
   useEffect(() => {
     if (phase === 'analyzing' && detector.status === 'done') {
       setIsVideoPaused(true);
@@ -97,14 +121,13 @@ export default function App() {
     }
   }, [phase, detector.status]);
 
-  // Cleanup object URL on unmount.
   useEffect(() => {
     return () => {
       if (recordedUrlRef.current) URL.revokeObjectURL(recordedUrlRef.current);
     };
   }, []);
 
-  // Playback overlay — draws bboxes synced to currentTime.
+  // Cloud: bbox overlay synced to the recorded video's currentTime.
   useEffect(() => {
     if (phase !== 'review') return;
     const canvas = overlayRef.current;
@@ -165,8 +188,6 @@ export default function App() {
         ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
       }
 
-      // Update playback progress bar via direct DOM (avoid per-frame
-      // re-renders).
       const fill = progressFillRef.current;
       if (fill && video.duration > 0) {
         fill.style.transform = `scaleX(${Math.min(1, t / video.duration)})`;
@@ -178,7 +199,65 @@ export default function App() {
     return () => cancelAnimationFrame(raf);
   }, [phase]);
 
-  const handleTap = useCallback(
+  // Local: bbox overlay synced to the live camera video.
+  useEffect(() => {
+    if (phase !== 'live') return;
+    const canvas = overlayRef.current;
+    const video = camera.videoEl;
+    if (!canvas || !video) return;
+
+    let raf = 0;
+    const draw = () => {
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      if (vw && vh) {
+        if (canvas.width !== vw) canvas.width = vw;
+        if (canvas.height !== vh) canvas.height = vh;
+      }
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        raf = requestAnimationFrame(draw);
+        return;
+      }
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      ctx.font =
+        '16px -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic UI", sans-serif';
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#9CA3AF';
+      ctx.setLineDash([6, 4]);
+
+      for (const b of localBoxesRef.current) {
+        const [x1, y1, x2, y2] = b.bbox;
+        ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+        const padding = 6;
+        const labelHeight = 22;
+        const textWidth = ctx.measureText(b.label).width + padding * 2;
+        const labelY = Math.max(0, y1 - labelHeight);
+        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        ctx.fillRect(x1, labelY, textWidth, labelHeight);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(b.label, x1 + padding, labelY + 16);
+      }
+
+      const now = performance.now();
+      flashesRef.current = flashesRef.current.filter((f) => f.expiry > now);
+      ctx.strokeStyle = '#3B82F6';
+      ctx.setLineDash([]);
+      ctx.lineWidth = 4;
+      for (const f of flashesRef.current) {
+        const [x1, y1, x2, y2] = f.bbox;
+        ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      }
+
+      raf = requestAnimationFrame(draw);
+    };
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, [phase, camera.videoEl]);
+
+  const handleTapReview = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
       const canvas = overlayRef.current;
       const video = reviewVideoRef.current;
@@ -220,7 +299,6 @@ export default function App() {
         }
       }
       if (!hit) {
-        // Tap outside any box: toggle play/pause.
         if (video.paused) video.play().catch(() => {});
         else video.pause();
         return;
@@ -230,10 +308,64 @@ export default function App() {
         bbox: hit.bbox,
         expiry: performance.now() + FLASH_MS,
       });
-      // Already in cart? Just flash, don't double-add.
       if (cartRef.current.has(hit.instance_id)) return;
       const entry: CartEntry = {
         instance_id: hit.instance_id,
+        label: hit.label,
+      };
+      setCart((prev) => {
+        const next = new Map(prev);
+        next.set(entry.instance_id, entry);
+        return next;
+      });
+    },
+    [],
+  );
+
+  const handleTapLive = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
+      const canvas = overlayRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+
+      const canvasAspect = canvas.width / canvas.height;
+      const rectAspect = rect.width / rect.height;
+      let scale: number;
+      let offsetX = 0;
+      let offsetY = 0;
+      if (canvasAspect > rectAspect) {
+        scale = canvas.height / rect.height;
+        offsetX = (canvas.width - rect.width * scale) / 2;
+      } else {
+        scale = canvas.width / rect.width;
+        offsetY = (canvas.height - rect.height * scale) / 2;
+      }
+      const x = (e.clientX - rect.left) * scale + offsetX;
+      const y = (e.clientY - rect.top) * scale + offsetY;
+
+      let hit: LiveBox | null = null;
+      let smallestArea = Infinity;
+      for (const b of localBoxesRef.current) {
+        const [x1, y1, x2, y2] = b.bbox;
+        if (x >= x1 && x <= x2 && y >= y1 && y <= y2) {
+          const area = (x2 - x1) * (y2 - y1);
+          if (area < smallestArea) {
+            smallestArea = area;
+            hit = b;
+          }
+        }
+      }
+      if (!hit) return;
+
+      flashesRef.current.push({
+        bbox: hit.bbox,
+        expiry: performance.now() + FLASH_MS,
+      });
+      // Local mode has no instance tracking — mint a fresh id per tap so each
+      // tap counts as a new cart instance.
+      localInstanceCounterRef.current += 1;
+      const entry: CartEntry = {
+        instance_id: -localInstanceCounterRef.current, // negative to avoid colliding with cloud's positive ids
         label: hit.label,
       };
       setCart((prev) => {
@@ -272,9 +404,12 @@ export default function App() {
     setPhase('cart');
   }, []);
 
+  const handleStopLive = useCallback(() => {
+    camera.stop();
+    setPhase('cart');
+  }, [camera]);
+
   const handleRetryAnalyze = useCallback(async () => {
-    // Re-analyze the same blob? The blob is gone after URL.createObjectURL,
-    // but the URL still works. Easier path: re-fetch from the URL.
     if (!recordedUrl) {
       setPhase('idle');
       return;
@@ -300,7 +435,6 @@ export default function App() {
     setPhase('idle');
   }, [detector]);
 
-  // Cart aggregation: group instances by label.
   const cartGroups = (() => {
     const groups = new Map<string, number[]>();
     for (const entry of cart.values()) {
@@ -324,14 +458,44 @@ export default function App() {
         <div className="screen idle">
           <h1>SmartCamera</h1>
           <p className="lead">
-            最大 10 秒の動画を撮影 → AI が物体を検出 → 動画を見ながらタップでカゴに追加。
+            {mode === 'cloud'
+              ? '最大 10 秒の動画を撮影 → AI が物体を検出 → 動画を見ながらタップでカゴに追加。'
+              : 'カメラを起動 → 写った物体に枠が出る → タップでカゴに追加。'}
           </p>
-          <p className="lead lead-tip">
-            ヒント: カメラはゆっくり動かしてください (速いとブレで検出精度が落ちます)。
-          </p>
+
+          <div className="mode-toggle" role="tablist" aria-label="モード">
+            <button
+              role="tab"
+              className={`mode-btn ${mode === 'cloud' ? 'on' : ''}`}
+              onClick={() => handleSetMode('cloud')}
+              aria-selected={mode === 'cloud'}
+            >
+              ☁️ クラウド
+              <span className="mode-sub">動画解析・任意物体</span>
+            </button>
+            <button
+              role="tab"
+              className={`mode-btn ${mode === 'local' ? 'on' : ''}`}
+              onClick={() => handleSetMode('local')}
+              aria-selected={mode === 'local'}
+            >
+              📱 ローカル
+              <span className="mode-sub">リアルタイム・80 種</span>
+            </button>
+          </div>
+
+          {mode === 'cloud' && (
+            <p className="lead lead-tip">
+              ヒント: カメラはゆっくり動かしてください (速いとブレで検出精度が落ちます)。
+            </p>
+          )}
+          {mode === 'local' && localDetector.error && (
+            <div className="status err">{localDetector.error}</div>
+          )}
           {camera.error && <div className="status err">{camera.error}</div>}
+
           <button className="primary" onClick={handleStart}>
-            📹 撮影開始
+            {mode === 'cloud' ? '📹 撮影開始' : '📷 カメラ開始'}
           </button>
         </div>
       )}
@@ -353,9 +517,7 @@ export default function App() {
             ×
           </button>
           {!camera.active && !camera.error && (
-            <div className="preview-tip">
-              カメラ起動中…
-            </div>
+            <div className="preview-tip">カメラ起動中…</div>
           )}
           {camera.active && (
             <div className="preview-tip">
@@ -408,12 +570,7 @@ export default function App() {
       {phase === 'analyzing' && detector.status !== 'error' && (
         <div className="screen running">
           {recordedUrl && (
-            <video
-              src={recordedUrl}
-              playsInline
-              muted
-              className="video"
-            />
+            <video src={recordedUrl} playsInline muted className="video" />
           )}
           <div className="analyzing-overlay">
             <div className="spinner" />
@@ -442,7 +599,7 @@ export default function App() {
           <canvas
             ref={overlayRef}
             className="overlay"
-            onPointerDown={handleTap}
+            onPointerDown={handleTapReview}
           />
           {isVideoPaused && (
             <div className="play-icon" aria-hidden="true">
@@ -482,6 +639,7 @@ export default function App() {
           )}
           {DEBUG && (
             <div className="debug">
+              <div>mode: cloud</div>
               <div>status: {detector.status}</div>
               <div>instances: {detector.detections.length}</div>
               <div>
@@ -491,6 +649,47 @@ export default function App() {
                   0,
                 )}
               </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {phase === 'live' && (
+        <div className="screen running">
+          <video
+            ref={camera.videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="video"
+          />
+          <canvas
+            ref={overlayRef}
+            className="overlay"
+            onPointerDown={handleTapLive}
+          />
+          <div className="badge">🛒 {cartCount}</div>
+          <button className="stop" onClick={handleStopLive}>
+            停止
+          </button>
+          {!localDetector.ready && !localDetector.error && (
+            <div className="preview-tip">モデル読み込み中…</div>
+          )}
+          {localDetector.error && (
+            <div className="error">エラー: {localDetector.error}</div>
+          )}
+          {camera.error && <div className="error">{camera.error}</div>}
+          {DEBUG && (
+            <div className="debug">
+              <div>mode: local</div>
+              <div>backend: {localDetector.backend ?? '—'}</div>
+              <div>infs: {localDetector.stats.inferences}</div>
+              <div>boxes: {localDetector.boxes.length}</div>
+              {localDetector.stats.lastError && (
+                <div className="debug-err">
+                  err: {localDetector.stats.lastError}
+                </div>
+              )}
             </div>
           )}
         </div>

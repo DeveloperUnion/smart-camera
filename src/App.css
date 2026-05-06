@@ -60,6 +60,51 @@ body,
   margin-top: -8px;
 }
 
+/* Mode toggle on idle screen (cloud / local) */
+.mode-toggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  width: 100%;
+  max-width: 360px;
+  background: #141414;
+  padding: 6px;
+  border-radius: 14px;
+  border: 1px solid #1f1f1f;
+}
+
+.mode-btn {
+  background: transparent;
+  border: none;
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: #c0c0c0;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  transition: background 0.15s, color 0.15s;
+}
+
+.mode-btn .mode-sub {
+  font-size: 11px;
+  font-weight: 400;
+  color: #707070;
+}
+
+.mode-btn.on {
+  background: #3b82f6;
+  color: #fff;
+}
+
+.mode-btn.on .mode-sub {
+  color: rgba(255, 255, 255, 0.85);
+}
+
 .status {
   font-size: 14px;
   color: #888;

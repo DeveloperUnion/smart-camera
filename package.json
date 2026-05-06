@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@google/genai": "^1.40.0",
+    "onnxruntime-web": "^1.24.3",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },
