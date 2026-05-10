@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { detect, loadModel } from './dfine';
+import { detect, loadModel } from './yolo11';
 import type { LiveBox } from './types';
 
 const DEFAULT_INTERVAL_MS = 333; // 3 fps default
