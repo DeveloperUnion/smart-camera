@@ -3,22 +3,39 @@ import { detect, loadModel } from './yolo11';
 import type { LiveBox } from './types';
 
 const DEFAULT_INTERVAL_MS = 333; // 3 fps default
+// iOS WebKit kills tabs that sustain ~30%+ CPU for several seconds, so back
+// off the inference cadence on iPhone/iPad where WASM is the only path.
+const MOBILE_WEBKIT_INTERVAL_MS = 666; // ~1.5 fps
+
+function isIOSWebKit(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent;
+  return (
+    /iPad|iPhone|iPod/.test(ua) ||
+    (ua.includes('Mac') &&
+      typeof document !== 'undefined' &&
+      'ontouchend' in document)
+  );
+}
 
 function readIntervalOverride(): number {
-  if (typeof window === 'undefined') return DEFAULT_INTERVAL_MS;
+  const base = isIOSWebKit() ? MOBILE_WEBKIT_INTERVAL_MS : DEFAULT_INTERVAL_MS;
+  if (typeof window === 'undefined') return base;
   const fpsParam = new URLSearchParams(window.location.search).get('fps');
   const fps = fpsParam ? Number(fpsParam) : NaN;
   if (Number.isFinite(fps) && fps > 0) return Math.round(1000 / fps);
-  return DEFAULT_INTERVAL_MS;
+  return base;
 }
 
 export function useLocalDetector(opts: {
   videoEl: HTMLVideoElement | null;
   enabled: boolean;
 }) {
-  const [boxes, setBoxes] = useState<LiveBox[]>([]);
+  // boxes is exposed as a ref (not state) so that 3fps inference doesn't
+  // re-render the entire App tree — the overlay rAF loop reads the ref directly.
+  const boxesRef = useRef<LiveBox[]>([]);
   const [ready, setReady] = useState(false);
-  const [backend, setBackend] = useState<'webgpu' | 'wasm' | null>(null);
+  const [backend, setBackend] = useState<'wasm' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState({ inferences: 0, lastError: '' });
   const scratchRef = useRef<HTMLCanvasElement | null>(null);
@@ -69,6 +86,12 @@ export function useLocalDetector(opts: {
 
     const loop = async (ts: number) => {
       if (stopped) return;
+      // Pause inference while the tab is hidden — sustained WASM/WebGPU work
+      // in the background is what triggers iOS WebKit's memory-pressure tab kill.
+      if (typeof document !== 'undefined' && document.hidden) {
+        if (!stopped) requestAnimationFrame(loop);
+        return;
+      }
       if (!inFlight && ts - lastRun >= intervalMs) {
         inFlight = true;
         lastRun = ts;
@@ -76,7 +99,7 @@ export function useLocalDetector(opts: {
           const scratch = scratchRef.current;
           if (scratch && video.videoWidth) {
             const dets = await detect(video, scratch);
-            if (!stopped) setBoxes(dets);
+            if (!stopped) boxesRef.current = dets;
             inferenceCountRef.current++;
           }
         } catch (e) {
@@ -94,9 +117,9 @@ export function useLocalDetector(opts: {
     return () => {
       stopped = true;
       clearInterval(statsTimer);
-      setBoxes([]);
+      boxesRef.current = [];
     };
   }, [opts.enabled, ready, opts.videoEl]);
 
-  return { boxes, ready, backend, error, stats };
+  return { boxesRef, ready, backend, error, stats };
 }

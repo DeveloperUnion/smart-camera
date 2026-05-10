@@ -25,6 +25,26 @@ const DEBUG =
   typeof window !== 'undefined' &&
   new URLSearchParams(window.location.search).get('debug') === '1';
 
+// The video/overlay use object-fit: cover, so on phones the canvas extends past
+// the visible viewport. Compute the visible canvas region (in canvas coords)
+// so labels and boxes can be clamped to what the user actually sees.
+function visibleCanvasRegion(canvas: HTMLCanvasElement) {
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) {
+    return { x1: 0, y1: 0, x2: canvas.width, y2: canvas.height };
+  }
+  const canvasAspect = canvas.width / canvas.height;
+  const rectAspect = rect.width / rect.height;
+  if (canvasAspect > rectAspect) {
+    const scale = canvas.height / rect.height;
+    const cropX = (canvas.width - rect.width * scale) / 2;
+    return { x1: cropX, y1: 0, x2: canvas.width - cropX, y2: canvas.height };
+  }
+  const scale = canvas.width / rect.width;
+  const cropY = (canvas.height - rect.height * scale) / 2;
+  return { x1: 0, y1: cropY, x2: canvas.width, y2: canvas.height - cropY };
+}
+
 type CartEntry = { instance_id: number; label: string };
 
 export default function App() {
@@ -57,8 +77,7 @@ export default function App() {
   // re-binding on every state update.
   const detectionsRef = useRef<Detection[]>([]);
   detectionsRef.current = detector.detections;
-  const localBoxesRef = useRef<LiveBox[]>([]);
-  localBoxesRef.current = localDetector.boxes;
+  const localBoxesRef = localDetector.boxesRef;
   const cartRef = useRef(cart);
   cartRef.current = cart;
 
@@ -149,23 +168,39 @@ export default function App() {
 
       ctx.font =
         '16px -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic UI", sans-serif';
+      const visible = visibleCanvasRegion(canvas);
       for (const b of boxes) {
         const inCart = cartRef.current.has(b.instance_id);
         ctx.lineWidth = inCart ? 3 : 2;
         ctx.strokeStyle = inCart ? '#3B82F6' : '#9CA3AF';
         if (inCart) ctx.setLineDash([]);
         else ctx.setLineDash([6, 4]);
-        const [x1, y1, x2, y2] = b.bbox;
+        const [rx1, ry1, rx2, ry2] = b.bbox;
+        if (rx2 <= visible.x1 || rx1 >= visible.x2 || ry2 <= visible.y1 || ry1 >= visible.y2) {
+          continue;
+        }
+        const x1 = Math.max(visible.x1, Math.min(visible.x2, rx1));
+        const y1 = Math.max(visible.y1, Math.min(visible.y2, ry1));
+        const x2 = Math.max(visible.x1, Math.min(visible.x2, rx2));
+        const y2 = Math.max(visible.y1, Math.min(visible.y2, ry2));
         ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
 
         const padding = 6;
         const labelHeight = 22;
-        const textWidth = ctx.measureText(b.label).width + padding * 2;
-        const labelY = Math.max(0, y1 - labelHeight);
+        const visibleW = visible.x2 - visible.x1;
+        const textWidth = Math.min(
+          visibleW,
+          ctx.measureText(b.label).width + padding * 2,
+        );
+        const labelX = Math.max(visible.x1, Math.min(x1, visible.x2 - textWidth));
+        const labelY =
+          y1 - labelHeight >= visible.y1
+            ? y1 - labelHeight
+            : Math.min(y1, visible.y2 - labelHeight);
         ctx.fillStyle = 'rgba(0,0,0,0.7)';
-        ctx.fillRect(x1, labelY, textWidth, labelHeight);
+        ctx.fillRect(labelX, labelY, textWidth, labelHeight);
         ctx.fillStyle = '#fff';
-        ctx.fillText(b.label, x1 + padding, labelY + 16);
+        ctx.fillText(b.label, labelX + padding, labelY + 16);
       }
 
       const now = performance.now();
@@ -217,18 +252,42 @@ export default function App() {
       ctx.strokeStyle = '#9CA3AF';
       ctx.setLineDash([6, 4]);
 
+      const visibleLive = visibleCanvasRegion(canvas);
       for (const b of localBoxesRef.current) {
-        const [x1, y1, x2, y2] = b.bbox;
+        const [rx1, ry1, rx2, ry2] = b.bbox;
+        if (
+          rx2 <= visibleLive.x1 ||
+          rx1 >= visibleLive.x2 ||
+          ry2 <= visibleLive.y1 ||
+          ry1 >= visibleLive.y2
+        ) {
+          continue;
+        }
+        const x1 = Math.max(visibleLive.x1, Math.min(visibleLive.x2, rx1));
+        const y1 = Math.max(visibleLive.y1, Math.min(visibleLive.y2, ry1));
+        const x2 = Math.max(visibleLive.x1, Math.min(visibleLive.x2, rx2));
+        const y2 = Math.max(visibleLive.y1, Math.min(visibleLive.y2, ry2));
         ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
 
         const padding = 6;
         const labelHeight = 22;
-        const textWidth = ctx.measureText(b.label).width + padding * 2;
-        const labelY = Math.max(0, y1 - labelHeight);
+        const visibleW = visibleLive.x2 - visibleLive.x1;
+        const textWidth = Math.min(
+          visibleW,
+          ctx.measureText(b.label).width + padding * 2,
+        );
+        const labelX = Math.max(
+          visibleLive.x1,
+          Math.min(x1, visibleLive.x2 - textWidth),
+        );
+        const labelY =
+          y1 - labelHeight >= visibleLive.y1
+            ? y1 - labelHeight
+            : Math.min(y1, visibleLive.y2 - labelHeight);
         ctx.fillStyle = 'rgba(0,0,0,0.7)';
-        ctx.fillRect(x1, labelY, textWidth, labelHeight);
+        ctx.fillRect(labelX, labelY, textWidth, labelHeight);
         ctx.fillStyle = '#fff';
-        ctx.fillText(b.label, x1 + padding, labelY + 16);
+        ctx.fillText(b.label, labelX + padding, labelY + 16);
       }
 
       const now = performance.now();
@@ -673,7 +732,6 @@ export default function App() {
               <div>mode: local</div>
               <div>backend: {localDetector.backend ?? '—'}</div>
               <div>infs: {localDetector.stats.inferences}</div>
-              <div>boxes: {localDetector.boxes.length}</div>
               {localDetector.stats.lastError && (
                 <div className="debug-err">
                   err: {localDetector.stats.lastError}

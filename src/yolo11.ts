@@ -1,4 +1,4 @@
-import * as ort from 'onnxruntime-web/webgpu';
+import * as ort from 'onnxruntime-web/wasm';
 import { labelOf } from './coco-labels';
 import type { LiveBox } from './types';
 
@@ -9,47 +9,25 @@ const SCORE_THRESHOLD = 0.3;
 const NMS_IOU_THRESHOLD = 0.5;
 
 let session: ort.InferenceSession | null = null;
-let activeBackend: 'webgpu' | 'wasm' | null = null;
+let activeBackend: 'wasm' | null = null;
 
 // Reused per-call buffers — allocated once at module init.
 const inputBuffer = new Float32Array(3 * INPUT_SIZE * INPUT_SIZE);
 
+// Use the wasm-only build (no WebGPU asyncify). The bundled webgpu variant is
+// ~23MB and pushes iPhone WebKit over its memory-pressure tab-kill threshold
+// during model load. The wasm-only artifacts are ~10MB or less.
 ort.env.wasm.wasmPaths =
   'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.3/dist/';
+// Pin to a single thread — iPhone WebKit cannot use SharedArrayBuffer without
+// COOP/COEP anyway, and the multi-thread loader path adds extra worker heaps
+// that contribute to the memory-pressure kill.
+ort.env.wasm.numThreads = 1;
 
-export async function loadModel(): Promise<{ backend: 'webgpu' | 'wasm' }> {
+export async function loadModel(): Promise<{ backend: 'wasm' }> {
   if (session && activeBackend) return { backend: activeBackend };
 
   const modelUrl = '/models/yolo11n_uint8.onnx';
-
-  const params =
-    typeof window !== 'undefined'
-      ? new URLSearchParams(window.location.search)
-      : new URLSearchParams();
-  const backendParam = params.get('backend');
-  // iOS Safari's WebGPU is still experimental and leaks GPU buffers under
-  // sustained inference. Default to WASM on iOS; override with ?backend=webgpu.
-  const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
-  const isIOS =
-    /iPad|iPhone|iPod/.test(ua) ||
-    (ua.includes('Mac') &&
-      typeof document !== 'undefined' &&
-      'ontouchend' in document);
-  const forceWasm =
-    backendParam === 'wasm' || (isIOS && backendParam !== 'webgpu');
-
-  if (!forceWasm) {
-    try {
-      session = await ort.InferenceSession.create(modelUrl, {
-        executionProviders: ['webgpu'],
-        graphOptimizationLevel: 'all',
-      });
-      activeBackend = 'webgpu';
-      return { backend: activeBackend };
-    } catch (e) {
-      console.warn('WebGPU unavailable, falling back to WASM:', e);
-    }
-  }
 
   session = await ort.InferenceSession.create(modelUrl, {
     executionProviders: ['wasm'],
