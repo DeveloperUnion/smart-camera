@@ -555,3 +555,85 @@ button.primary:disabled {
   transform: scaleX(0);
   transform-origin: left;
 }
+
+/* Always-visible cart strip in local (live) mode. Sits above the stop button
+   so the user can see what they've selected without leaving the camera view. */
+.live-cart-panel {
+  position: absolute;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 92px);
+  left: 12px;
+  right: 12px;
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 8px 4px;
+  scrollbar-width: none;
+  z-index: 5;
+  -webkit-overflow-scrolling: touch;
+}
+
+.live-cart-panel::-webkit-scrollbar {
+  display: none;
+}
+
+.live-cart-empty {
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: #d1d5db;
+  font-size: 13px;
+  padding: 8px 14px;
+  border-radius: 100px;
+  white-space: nowrap;
+}
+
+.live-cart-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(59, 130, 246, 0.92);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 6px 6px 6px 12px;
+  border-radius: 100px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.live-cart-chip-label {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.live-cart-chip-count {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+  font-weight: 500;
+}
+
+.live-cart-chip-remove {
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+  border: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 100px;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.live-cart-chip-remove:active {
+  background: rgba(255, 255, 255, 0.3);
+}

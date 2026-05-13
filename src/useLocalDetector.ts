@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { detect, loadModel } from './yolo11';
-import type { LiveBox } from './types';
+import { LocalTracker } from './localTracker';
+import type { TrackedBox } from './types';
 
 const DEFAULT_INTERVAL_MS = 333; // 3 fps default
 // iOS WebKit kills tabs that sustain ~30%+ CPU for several seconds, so back
@@ -33,7 +34,7 @@ export function useLocalDetector(opts: {
 }) {
   // boxes is exposed as a ref (not state) so that 3fps inference doesn't
   // re-render the entire App tree — the overlay rAF loop reads the ref directly.
-  const boxesRef = useRef<LiveBox[]>([]);
+  const boxesRef = useRef<TrackedBox[]>([]);
   const [ready, setReady] = useState(false);
   const [backend, setBackend] = useState<'wasm' | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -41,6 +42,8 @@ export function useLocalDetector(opts: {
   const scratchRef = useRef<HTMLCanvasElement | null>(null);
   const inferenceCountRef = useRef(0);
   const lastErrorRef = useRef('');
+  const trackerRef = useRef<LocalTracker | null>(null);
+  if (!trackerRef.current) trackerRef.current = new LocalTracker();
 
   if (!scratchRef.current && typeof document !== 'undefined') {
     scratchRef.current = document.createElement('canvas');
@@ -99,7 +102,12 @@ export function useLocalDetector(opts: {
           const scratch = scratchRef.current;
           if (scratch && video.videoWidth) {
             const dets = await detect(video, scratch);
-            if (!stopped) boxesRef.current = dets;
+            if (!stopped) {
+              const tracker = trackerRef.current;
+              boxesRef.current = tracker
+                ? tracker.update(dets, performance.now())
+                : [];
+            }
             inferenceCountRef.current++;
           }
         } catch (e) {
@@ -118,6 +126,7 @@ export function useLocalDetector(opts: {
       stopped = true;
       clearInterval(statsTimer);
       boxesRef.current = [];
+      trackerRef.current?.reset();
     };
   }, [opts.enabled, ready, opts.videoEl]);
 

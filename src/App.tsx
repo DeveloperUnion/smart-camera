@@ -4,7 +4,7 @@ import { useRecorder, MAX_DURATION_MS } from './useRecorder';
 import { useVideoDetector } from './useVideoDetector';
 import { useLocalDetector } from './useLocalDetector';
 import { activeBoxesAt } from './playbackOverlay';
-import type { Detection, LiveBox } from './types';
+import type { Detection, TrackedBox } from './types';
 import './App.css';
 
 type Mode = 'cloud' | 'local';
@@ -50,12 +50,12 @@ type CartEntry = { instance_id: number; label: string };
 export default function App() {
   const [mode, setMode] = useState<Mode>('cloud');
   const [phase, setPhase] = useState<Phase>('idle');
-  // Cart keyed by instance_id (cloud) or a fresh counter id (local) so that
-  // tapping the same physical object twice doesn't double-count, while
-  // distinct instances of the same label aggregate as count.
+  // Cart keyed by instance_id — cloud uses Gemini's stable id, local uses the
+  // sticky id assigned by LocalTracker. Either way, tapping the same physical
+  // object twice is deduped, while distinct instances of the same label
+  // aggregate as count.
   const [cart, setCart] = useState<Map<number, CartEntry>>(new Map());
   const flashesRef = useRef<Flash[]>([]);
-  const localInstanceCounterRef = useRef(0);
 
   // Refs for the live preview/recording (camera) and playback (review).
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -248,12 +248,14 @@ export default function App() {
 
       ctx.font =
         '16px -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic UI", sans-serif';
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = '#9CA3AF';
-      ctx.setLineDash([6, 4]);
 
       const visibleLive = visibleCanvasRegion(canvas);
       for (const b of localBoxesRef.current) {
+        const inCart = cartRef.current.has(b.instance_id);
+        ctx.lineWidth = inCart ? 3 : 2;
+        ctx.strokeStyle = inCart ? '#3B82F6' : '#9CA3AF';
+        if (inCart) ctx.setLineDash([]);
+        else ctx.setLineDash([6, 4]);
         const [rx1, ry1, rx2, ry2] = b.bbox;
         if (
           rx2 <= visibleLive.x1 ||
@@ -392,7 +394,7 @@ export default function App() {
       const x = (e.clientX - rect.left) * scale + offsetX;
       const y = (e.clientY - rect.top) * scale + offsetY;
 
-      let hit: LiveBox | null = null;
+      let hit: TrackedBox | null = null;
       let smallestArea = Infinity;
       for (const b of localBoxesRef.current) {
         const [x1, y1, x2, y2] = b.bbox;
@@ -410,11 +412,9 @@ export default function App() {
         bbox: hit.bbox,
         expiry: performance.now() + FLASH_MS,
       });
-      // Local mode has no instance tracking — mint a fresh id per tap so each
-      // tap counts as a new cart instance.
-      localInstanceCounterRef.current += 1;
+      if (cartRef.current.has(hit.instance_id)) return;
       const entry: CartEntry = {
-        instance_id: -localInstanceCounterRef.current, // negative to avoid colliding with cloud's positive ids
+        instance_id: hit.instance_id,
         label: hit.label,
       };
       setCart((prev) => {
@@ -716,7 +716,35 @@ export default function App() {
             className="overlay"
             onPointerDown={handleTapLive}
           />
-          <div className="badge">🛒 {cartCount}</div>
+          <div className="live-cart-panel">
+            {cartGroups.length === 0 ? (
+              <div className="live-cart-empty">
+                枠をタップしてカゴに追加
+              </div>
+            ) : (
+              cartGroups.map(([label, instances]) => (
+                <div className="live-cart-chip" key={label}>
+                  <span className="live-cart-chip-label">{label}</span>
+                  <span className="live-cart-chip-count">
+                    ×{instances.length}
+                  </span>
+                  <button
+                    className="live-cart-chip-remove"
+                    onClick={() =>
+                      setCart((prev) => {
+                        const next = new Map(prev);
+                        for (const id of instances) next.delete(id);
+                        return next;
+                      })
+                    }
+                    aria-label="削除"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
           <button className="stop" onClick={handleStopLive}>
             停止
           </button>
