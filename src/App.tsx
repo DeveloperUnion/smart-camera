@@ -760,6 +760,11 @@ export default function App() {
               <div>mode: local</div>
               <div>backend: {localDetector.backend ?? '—'}</div>
               <div>infs: {localDetector.stats.inferences}</div>
+              <div>
+                maxScore: {localDetector.stats.maxScore.toFixed(3)} raw:{' '}
+                {localDetector.stats.rawCount} kept:{' '}
+                {localDetector.stats.keptCount}
+              </div>
               {localDetector.stats.lastError && (
                 <div className="debug-err">
                   err: {localDetector.stats.lastError}

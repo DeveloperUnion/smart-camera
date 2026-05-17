@@ -8,7 +8,16 @@ import type { LiveBox } from './types';
 const INPUT_SIZE = 512;
 const NUM_CLASSES = OIV7_LABELS_JP.length; // 601 (Open Images V7)
 const NUM_ANCHORS = 5376; // 64*64 + 32*32 + 16*16
-const SCORE_THRESHOLD = 0.3;
+// OIV7-trained YOLOv8n produces noticeably lower per-class sigmoid scores
+// than COCO-trained YOLOv11n on equivalent objects (601 classes spread the
+// supervision thinner), so 0.3 was filtering out almost everything in
+// real-world phone scenes. Default 0.2 with `?conf=N` override for tuning.
+const SCORE_THRESHOLD = (() => {
+  if (typeof window === 'undefined') return 0.2;
+  const p = new URLSearchParams(window.location.search).get('conf');
+  const n = p ? Number(p) : NaN;
+  return Number.isFinite(n) && n > 0 && n < 1 ? n : 0.2;
+})();
 const NMS_IOU_THRESHOLD = 0.5;
 
 let session: ort.InferenceSession | null = null;
@@ -109,11 +118,20 @@ function iou(a: Candidate, b: Candidate): number {
   return inter / (aArea + bArea - inter);
 }
 
-// Output shape [1, 84, 8400]: 4 box (cx,cy,w,h in input pixel space) + 80 class
-// scores per anchor. Class scores are already sigmoid'd by the export.
+// Diagnostic counters from the last postprocess pass — exposed to the
+// debug overlay so we can tell "model produced nothing" from "threshold
+// rejected everything" when triaging recall issues.
+export let lastMaxScore = 0;
+export let lastRawCount = 0;
+export let lastKeptCount = 0;
+
+// Output shape [1, 4+NUM_CLASSES, NUM_ANCHORS]: 4 box (cx,cy,w,h in input
+// pixel space) + per-class scores per anchor. Class scores are already
+// sigmoid'd by the Ultralytics ONNX export.
 function postprocess(output: Float32Array, meta: LetterboxMeta): LiveBox[] {
   const candidates: Candidate[] = [];
   const stride = NUM_ANCHORS;
+  let frameMaxScore = 0;
 
   for (let i = 0; i < NUM_ANCHORS; i++) {
     let bestClass = 0;
@@ -125,6 +143,7 @@ function postprocess(output: Float32Array, meta: LetterboxMeta): LiveBox[] {
         bestClass = c;
       }
     }
+    if (bestScore > frameMaxScore) frameMaxScore = bestScore;
     if (bestScore < SCORE_THRESHOLD) continue;
 
     const cx = output[i];
@@ -171,6 +190,10 @@ function postprocess(output: Float32Array, meta: LetterboxMeta): LiveBox[] {
       }
     }
   }
+
+  lastMaxScore = frameMaxScore;
+  lastRawCount = candidates.length;
+  lastKeptCount = kept.length;
 
   return kept.map((c) => ({
     bbox: [c.x1, c.y1, c.x2, c.y2],

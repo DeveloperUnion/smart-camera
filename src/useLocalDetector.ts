@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { detect, loadModel } from './yolo11';
+import * as yolo from './yolo11';
 import { LocalTracker } from './localTracker';
 import type { TrackedBox } from './types';
+
+const { detect, loadModel } = yolo;
 
 const DEFAULT_INTERVAL_MS = 333; // 3 fps default
 // iOS WebKit kills tabs that sustain ~30%+ CPU for several seconds, so back
@@ -38,7 +40,13 @@ export function useLocalDetector(opts: {
   const [ready, setReady] = useState(false);
   const [backend, setBackend] = useState<'wasm' | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [stats, setStats] = useState({ inferences: 0, lastError: '' });
+  const [stats, setStats] = useState({
+    inferences: 0,
+    lastError: '',
+    maxScore: 0,
+    rawCount: 0,
+    keptCount: 0,
+  });
   const scratchRef = useRef<HTMLCanvasElement | null>(null);
   const inferenceCountRef = useRef(0);
   const lastErrorRef = useRef('');
@@ -82,6 +90,9 @@ export function useLocalDetector(opts: {
       setStats({
         inferences: inferenceCountRef.current,
         lastError: lastErrorRef.current,
+        maxScore: yolo.lastMaxScore,
+        rawCount: yolo.lastRawCount,
+        keptCount: yolo.lastKeptCount,
       });
     }, 1000);
 
