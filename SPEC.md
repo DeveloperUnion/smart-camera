@@ -3,7 +3,7 @@
 スマホブラウザで動く、物体検知 + カゴ追加アプリ。idle 画面のトグルで 2 つのモードを切り替え可能:
 
 - **クラウド (動画解析)**: 最大 10 秒の動画を撮影 → Gemini 3 Flash で全フレーム横断の物体検知 + instance tracking → 動画再生に同期して bbox を重畳表示 → タップでカゴ追加。任意物体・日本語ラベル直接出力。
-- **ローカル (リアルタイム)**: YOLOv11n (ONNX, dynamic int8 量子化, ~2.9MB) を on-device で実行、ライブカメラに bbox を毎フレーム (~3fps) 重畳 → タップでカゴ追加。COCO 80 クラス、Gemini 不要、ネットワーク不要。iOS Safari ではメモリ上限により ~15–40s で落ちる既知の制約あり。
+- **ローカル (リアルタイム)**: YOLOv8n-OIV7 (Open Images V7 事前学習版、ONNX, dynamic int8 量子化, ~3.7MB) を on-device で実行、ライブカメラに bbox を毎フレーム (~3fps) 重畳 → タップでカゴ追加。**601 クラス**(家電・道具・文房具・容器・食品・動植物等)、Gemini 不要、ネットワーク不要。iOS Safari ではメモリ上限により落ちる場合があるため検証必要。
 
 モード選択は永続化されない (リロードでクラウドに戻る)。
 
@@ -108,3 +108,60 @@ bbox は 0–1 正規化 (xyxy)。`time_s` は動画先頭からの秒数。
 ## コスト目安
 
 10 秒動画 1 回スキャン (4 fps サンプリング): 約 $0.010–0.015 (Gemini 3 Flash の入出力トークン換算)
+
+## ローカル検出モデル(OIV7-601)
+
+ローカルモードは **Ultralytics 公式の `yolov8n-oiv7.pt`** をベースに ONNX export + INT8 動的量子化したものを使用。601 クラスで COCO 80 を大きく上回るカバレッジを得つつ、量子化後 3.7 MB と現実的なサイズに収まる。
+
+候補比較(採用時の検討):
+
+| データセット | クラス数 | 出力テンソル(FP32) | 公式重み入手 | 採否 |
+|---|---|---|---|---|
+| COCO(旧) | 80 | ~2.8 MB | ✅ `yolo11n.pt` | 旧構成 |
+| **Open Images V7(採用)** | **601** | **~20 MB** | ✅ **`yolov8n-oiv7.pt`** | ✅ |
+| Objects365 | 365 | ~12 MB | △ 部分的 | iOS で落ちる場合の代替候補 |
+| LVIS | 1203 | ~40 MB | △ community release | ロングテイルで実用精度落ち + iOS メモリ危険のため不採用 |
+
+注: 同じ公式リリースに `yolo11n-oiv7.pt` は存在しないため v8n ベースを採用。出力フォーマット(`[1, 4+NUM_CLASSES, 8400]` anchor-free 形式)は v11 と同一なので推論コード(`src/yolo11.ts`)はそのまま動作する。ファイル名 `yolo11.ts` は歴史的経緯で残置(改名は将来のリファクタで)。
+
+### モデル成果物(リポジトリ外の export 手順、再生成する場合)
+
+```python
+from ultralytics import YOLO
+m = YOLO('yolov8n-oiv7.pt')  # 公式重みを自動ダウンロード(6.9 MB)
+m.export(format='onnx', imgsz=640, opset=17, dynamic=False, simplify=True)
+
+from onnxruntime.quantization import quantize_dynamic, QuantType
+quantize_dynamic(
+    'yolov8n-oiv7.onnx',
+    'yolov8n_oiv7_uint8.onnx',
+    weight_type=QuantType.QUInt8,
+    per_channel=True,
+)
+```
+
+ノートPC で数分、GPU 不要、fine-tuning 不要。
+
+成果物:
+- `public/models/yolov8n_oiv7_uint8.onnx` — 量子化済みモデル(~3.7 MB)
+- `src/oiv7-labels.ts` — 601 クラスの日本語ラベル配列 + `labelOf(classId)` ヘルパー
+
+### iOS 互換性リスクと対処
+
+OIV7 の出力テンソル ~20MB(FP32 で 4×8400 + 601×8400)は現状の COCO 構成 ~2.8MB から +17MB の上乗せ。iOS Safari の memory-pressure 閾値内に収まる公算は高いが実機検証必須。
+
+**iOS 実機で落ちる場合の対処順序:**
+1. `postprocess` の `SCORE_THRESHOLD` を 0.3 → 0.35 に引き上げ、`bestScore < threshold` の anchor を bbox 復号前にスキップ
+2. **Objects365 (365クラス, ~12MB) に切替** — community release を要探索だが出力テンソル半減
+3. それでもダメなら入力解像度 640²→416² で再 export(活性化テンソル ~40% 削減)
+
+### 検証要件
+
+- iPhone 14 以降の実機で 5 分連続ライブ実行、タブキル無し
+- `performance.measureUserAgentSpecificMemory()` でピーク working set < 250 MB
+- COCO 同等クラス(人、車、椅子、ノートPC等)の検出が旧構成と同等以上
+- OIV7 で広がった「細かい物」サンプル動作確認: ハサミ・包丁・リモコン・電卓・各種容器・キーボード・USBケーブル等
+
+### ライセンス注意
+
+Ultralytics YOLO は **AGPL-3.0**。社外公開する場合は商用ライセンス、または Apache-2.0 の代替(YOLOE-S 等)への切替検討が必要。OIV7 自体のライセンスは Apache-2.0 + CC-BY-4.0(再配布可)。

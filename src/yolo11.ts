@@ -1,9 +1,9 @@
 import * as ort from 'onnxruntime-web/wasm';
-import { labelOf } from './coco-labels';
+import { labelOf, OIV7_LABELS_JP } from './oiv7-labels';
 import type { LiveBox } from './types';
 
 const INPUT_SIZE = 640;
-const NUM_CLASSES = 80;
+const NUM_CLASSES = OIV7_LABELS_JP.length; // 601 (Open Images V7)
 const NUM_ANCHORS = 8400; // 80*80 + 40*40 + 20*20
 const SCORE_THRESHOLD = 0.3;
 const NMS_IOU_THRESHOLD = 0.5;
@@ -27,7 +27,7 @@ ort.env.wasm.numThreads = 1;
 export async function loadModel(): Promise<{ backend: 'wasm' }> {
   if (session && activeBackend) return { backend: activeBackend };
 
-  const modelUrl = '/models/yolo11n_uint8.onnx';
+  const modelUrl = '/models/yolov8n_oiv7_uint8.onnx';
 
   session = await ort.InferenceSession.create(modelUrl, {
     executionProviders: ['wasm'],
