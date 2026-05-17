@@ -111,18 +111,25 @@ bbox は 0–1 正規化 (xyxy)。`time_s` は動画先頭からの秒数。
 
 ## ローカル検出モデル(OIV7-601)
 
-ローカルモードは **Ultralytics 公式の `yolov8n-oiv7.pt`** をベースに **416² 入力**で ONNX export + INT8 動的量子化(per-tensor)したものを使用。601 クラスで COCO 80 を大きく上回るカバレッジを得つつ、量子化後 3.6 MB に収まる。
+ローカルモードは **Ultralytics 公式の `yolov8n-oiv7.pt`** をベースに **512² 入力**で ONNX export + INT8 動的量子化(per-tensor)したものを使用。601 クラスで COCO 80 を大きく上回るカバレッジを得つつ、量子化後 3.6 MB に収まる。
 
 候補比較(採用時の検討):
 
-| データセット | クラス数 | 出力テンソル(FP32 @640²) | 公式重み入手 | 採否 |
+| データセット | クラス数 | 出力テンソル(FP32) | 公式重み入手 | 採否 |
 |---|---|---|---|---|
-| COCO(旧) | 80 | ~2.8 MB | ✅ `yolo11n.pt` | 旧構成 |
-| **Open Images V7(採用)** | **601** | ~20 MB @640² / **~8.5 MB @416²** | ✅ **`yolov8n-oiv7.pt`** | ✅ |
-| Objects365 | 365 | ~12 MB | △ 部分的 | OIV7 が iOS で動かない場合の代替候補 |
-| LVIS | 1203 | ~40 MB | △ community release | ロングテイルで実用精度落ち + iOS メモリ危険のため不採用 |
+| COCO(旧) | 80 | ~2.8 MB @640² | ✅ `yolo11n.pt` | 旧構成 |
+| **Open Images V7(採用)** | **601** | **~13 MB @512²** / ~20MB @640² / ~8.5MB @416² | ✅ **`yolov8n-oiv7.pt`** | ✅ |
+| Objects365 | 365 | ~12 MB @640² | △ 部分的 | OIV7 が iOS で動かない場合の代替候補 |
+| LVIS | 1203 | ~40 MB @640² | △ community release | ロングテイルで実用精度落ち + iOS メモリ危険のため不採用 |
 
-入力解像度を **640² → 416² に下げている** 理由: 640² 出力テンソル [1, 605, 8400] は ~20 MB FP32 で、iOS Safari の memory-pressure 閾値に当たって `InferenceSession.create` が "Load failed" で落ちることが実機で確認された。416² なら出力 [1, 605, 3549] = ~8.5 MB に収まり、動作する。検出最小サイズは粗くなる(640²→416² で検出可能オブジェクトの最小寸法が 1.5 倍程度)が、カメラを物体に近づける UX なら実用上の影響は小さい。
+入力解像度の選定経緯:
+- **640²**: 出力 [1, 605, 8400] = ~20MB FP32 で iOS Safari の memory-pressure 閾値に当たり "Load failed" で落ちることが実機確認
+- **416²**: 出力 ~8.5MB で iOS 動作するが、小さい物体・遠い物体の検出が顕著に落ちる
+- **512²(採用)**: 出力 [1, 605, 5376] = ~13MB、iOS 動作圏内で 416² より明確に高精度
+
+### NMS は class-agnostic
+
+OIV7 には階層的クラス(例: `Bus` ⊂ `Land vehicle` ⊂ `Vehicle`、`Cat` ⊂ `Carnivore` ⊂ `Mammal`、`Apple` ⊂ `Fruit` ⊂ `Food`)が大量にあり、一つの物体に複数の親クラスラベルが同時に発火する。class-aware NMS だと同じ箱に「バス」「陸上車両」「車両」が重なって画面が破綻するため、**class-agnostic NMS**(クラスを問わず IoU > 0.5 で抑制)に変更してある(`src/yolo11.ts:postprocess`)。これにより各物体に最も高スコアのラベルだけが残る。
 
 注: 公式リリースに `yolo11n-oiv7.pt` は存在しないため v8n ベース。出力フォーマットは v11 と同一の anchor-free 形式なので推論コード(`src/yolo11.ts`)はそのまま動作。ファイル名 `yolo11.ts` は歴史的経緯で残置(改名は将来のリファクタで)。
 
@@ -131,12 +138,12 @@ bbox は 0–1 正規化 (xyxy)。`time_s` は動画先頭からの秒数。
 ```python
 from ultralytics import YOLO
 m = YOLO('yolov8n-oiv7.pt')  # 公式重みを自動ダウンロード(6.9 MB)
-m.export(format='onnx', imgsz=416, opset=17, dynamic=False, simplify=True)
+m.export(format='onnx', imgsz=512, opset=17, dynamic=False, simplify=True)
 
 from onnxruntime.quantization import quantize_dynamic, QuantType
 quantize_dynamic(
     'yolov8n-oiv7.onnx',
-    'yolov8n_oiv7_416_uint8.onnx',
+    'yolov8n_oiv7_512_uint8.onnx',
     weight_type=QuantType.QUInt8,
     per_channel=False,  # per-tensor は onnxruntime-web WASM との相性が良い
 )
@@ -145,13 +152,13 @@ quantize_dynamic(
 ノートPC で数分、GPU 不要、fine-tuning 不要。
 
 成果物:
-- `public/models/yolov8n_oiv7_416_uint8.onnx` — 量子化済みモデル(~3.6 MB)
+- `public/models/yolov8n_oiv7_512_uint8.onnx` — 量子化済みモデル(~3.6 MB)
 - `src/oiv7-labels.ts` — 601 クラスの日本語ラベル配列 + `labelOf(classId)` ヘルパー
 
 ### iOS 互換性リスクと対処(現状からさらに落ちる場合)
 
-1. `postprocess` の `SCORE_THRESHOLD` を 0.3 → 0.35 に引き上げ、`bestScore < threshold` の anchor を bbox 復号前にスキップ
-2. **入力解像度 416² → 320² に再 export**(活性化テンソル ~40% 削減)
+1. **入力解像度 512² → 416² に再 export**(活性化テンソル ~38% 削減、精度トレードオフ)
+2. `postprocess` の `SCORE_THRESHOLD` を 0.3 → 0.35 に引き上げ、`bestScore < threshold` の anchor を bbox 復号前にスキップ
 3. **Objects365 (365クラス) に切替** — community release を要探索だが出力テンソル半減
 
 ### 検証要件
