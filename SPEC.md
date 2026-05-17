@@ -111,49 +111,48 @@ bbox は 0–1 正規化 (xyxy)。`time_s` は動画先頭からの秒数。
 
 ## ローカル検出モデル(OIV7-601)
 
-ローカルモードは **Ultralytics 公式の `yolov8n-oiv7.pt`** をベースに ONNX export + INT8 動的量子化したものを使用。601 クラスで COCO 80 を大きく上回るカバレッジを得つつ、量子化後 3.7 MB と現実的なサイズに収まる。
+ローカルモードは **Ultralytics 公式の `yolov8n-oiv7.pt`** をベースに **416² 入力**で ONNX export + INT8 動的量子化(per-tensor)したものを使用。601 クラスで COCO 80 を大きく上回るカバレッジを得つつ、量子化後 3.6 MB に収まる。
 
 候補比較(採用時の検討):
 
-| データセット | クラス数 | 出力テンソル(FP32) | 公式重み入手 | 採否 |
+| データセット | クラス数 | 出力テンソル(FP32 @640²) | 公式重み入手 | 採否 |
 |---|---|---|---|---|
 | COCO(旧) | 80 | ~2.8 MB | ✅ `yolo11n.pt` | 旧構成 |
-| **Open Images V7(採用)** | **601** | **~20 MB** | ✅ **`yolov8n-oiv7.pt`** | ✅ |
-| Objects365 | 365 | ~12 MB | △ 部分的 | iOS で落ちる場合の代替候補 |
+| **Open Images V7(採用)** | **601** | ~20 MB @640² / **~8.5 MB @416²** | ✅ **`yolov8n-oiv7.pt`** | ✅ |
+| Objects365 | 365 | ~12 MB | △ 部分的 | OIV7 が iOS で動かない場合の代替候補 |
 | LVIS | 1203 | ~40 MB | △ community release | ロングテイルで実用精度落ち + iOS メモリ危険のため不採用 |
 
-注: 同じ公式リリースに `yolo11n-oiv7.pt` は存在しないため v8n ベースを採用。出力フォーマット(`[1, 4+NUM_CLASSES, 8400]` anchor-free 形式)は v11 と同一なので推論コード(`src/yolo11.ts`)はそのまま動作する。ファイル名 `yolo11.ts` は歴史的経緯で残置(改名は将来のリファクタで)。
+入力解像度を **640² → 416² に下げている** 理由: 640² 出力テンソル [1, 605, 8400] は ~20 MB FP32 で、iOS Safari の memory-pressure 閾値に当たって `InferenceSession.create` が "Load failed" で落ちることが実機で確認された。416² なら出力 [1, 605, 3549] = ~8.5 MB に収まり、動作する。検出最小サイズは粗くなる(640²→416² で検出可能オブジェクトの最小寸法が 1.5 倍程度)が、カメラを物体に近づける UX なら実用上の影響は小さい。
+
+注: 公式リリースに `yolo11n-oiv7.pt` は存在しないため v8n ベース。出力フォーマットは v11 と同一の anchor-free 形式なので推論コード(`src/yolo11.ts`)はそのまま動作。ファイル名 `yolo11.ts` は歴史的経緯で残置(改名は将来のリファクタで)。
 
 ### モデル成果物(リポジトリ外の export 手順、再生成する場合)
 
 ```python
 from ultralytics import YOLO
 m = YOLO('yolov8n-oiv7.pt')  # 公式重みを自動ダウンロード(6.9 MB)
-m.export(format='onnx', imgsz=640, opset=17, dynamic=False, simplify=True)
+m.export(format='onnx', imgsz=416, opset=17, dynamic=False, simplify=True)
 
 from onnxruntime.quantization import quantize_dynamic, QuantType
 quantize_dynamic(
     'yolov8n-oiv7.onnx',
-    'yolov8n_oiv7_uint8.onnx',
+    'yolov8n_oiv7_416_uint8.onnx',
     weight_type=QuantType.QUInt8,
-    per_channel=True,
+    per_channel=False,  # per-tensor は onnxruntime-web WASM との相性が良い
 )
 ```
 
 ノートPC で数分、GPU 不要、fine-tuning 不要。
 
 成果物:
-- `public/models/yolov8n_oiv7_uint8.onnx` — 量子化済みモデル(~3.7 MB)
+- `public/models/yolov8n_oiv7_416_uint8.onnx` — 量子化済みモデル(~3.6 MB)
 - `src/oiv7-labels.ts` — 601 クラスの日本語ラベル配列 + `labelOf(classId)` ヘルパー
 
-### iOS 互換性リスクと対処
+### iOS 互換性リスクと対処(現状からさらに落ちる場合)
 
-OIV7 の出力テンソル ~20MB(FP32 で 4×8400 + 601×8400)は現状の COCO 構成 ~2.8MB から +17MB の上乗せ。iOS Safari の memory-pressure 閾値内に収まる公算は高いが実機検証必須。
-
-**iOS 実機で落ちる場合の対処順序:**
 1. `postprocess` の `SCORE_THRESHOLD` を 0.3 → 0.35 に引き上げ、`bestScore < threshold` の anchor を bbox 復号前にスキップ
-2. **Objects365 (365クラス, ~12MB) に切替** — community release を要探索だが出力テンソル半減
-3. それでもダメなら入力解像度 640²→416² で再 export(活性化テンソル ~40% 削減)
+2. **入力解像度 416² → 320² に再 export**(活性化テンソル ~40% 削減)
+3. **Objects365 (365クラス) に切替** — community release を要探索だが出力テンソル半減
 
 ### 検証要件
 

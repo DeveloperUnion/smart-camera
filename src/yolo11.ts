@@ -2,9 +2,12 @@ import * as ort from 'onnxruntime-web/wasm';
 import { labelOf, OIV7_LABELS_JP } from './oiv7-labels';
 import type { LiveBox } from './types';
 
-const INPUT_SIZE = 640;
+// 416² input keeps the OIV7 605-channel output activation small enough
+// (~8.5MB FP32 instead of ~20MB at 640²) to fit inside the iPhone WebKit
+// memory-pressure budget that already constrains this app.
+const INPUT_SIZE = 416;
 const NUM_CLASSES = OIV7_LABELS_JP.length; // 601 (Open Images V7)
-const NUM_ANCHORS = 8400; // 80*80 + 40*40 + 20*20
+const NUM_ANCHORS = 3549; // 52*52 + 26*26 + 13*13
 const SCORE_THRESHOLD = 0.3;
 const NMS_IOU_THRESHOLD = 0.5;
 
@@ -27,7 +30,7 @@ ort.env.wasm.numThreads = 1;
 export async function loadModel(): Promise<{ backend: 'wasm' }> {
   if (session && activeBackend) return { backend: activeBackend };
 
-  const modelUrl = '/models/yolov8n_oiv7_uint8.onnx';
+  const modelUrl = '/models/yolov8n_oiv7_416_uint8.onnx';
 
   session = await ort.InferenceSession.create(modelUrl, {
     executionProviders: ['wasm'],
