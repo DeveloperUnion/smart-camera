@@ -2,7 +2,7 @@
 
 スマホブラウザで動く、物体検知 + カゴ追加アプリ。**ローカル YOLO + Gemini 詳細化のハイブリッド**:
 
-1. ライブカメラに対し on-device で YOLOv8n-OIV7 (601 クラス) を毎フレーム (~3fps) 実行、bbox + 日本語ラベルを重畳表示
+1. ライブカメラに対し on-device で YOLOv11n-COCO (80 クラス) を毎フレーム (~3fps) 実行、bbox + 粗い日本語ラベルを重畳表示
 2. ユーザーがタップ → bbox 内のフレームをスナップショット (フルフレーム JPEG + bbox メタ) として保持。カートには即座に YOLO ラベルが追加される
 3. 「停止」タップ → スナップショット群を 1 リクエストで Gemini 3 Flash に送り、各物体の構造化属性 (`specific_name`, `brand`, `category`, `color`, `size_estimate`) を取得
 4. カート画面で YOLO ラベルを Gemini の `specific_name` で置き換え、補助属性を 2 行目に表示
@@ -27,7 +27,7 @@
 | 領域 | 採用 |
 |---|---|
 | フロント | React 19 + Vite + TypeScript |
-| ローカル推論 | YOLOv8n-OIV7 INT8 ONNX (601 クラス), `onnxruntime-web` WASM |
+| ローカル推論 | YOLOv11n-COCO INT8 ONNX (80 クラス), `onnxruntime-web` WASM |
 | 詳細化 | Gemini 3 Flash (`@google/genai`, multimodal) |
 | サーバ | Vercel Serverless Function (`/api/refine-items`) |
 | カメラ | `getUserMedia` (`facingMode: 'environment'`) |
@@ -122,41 +122,42 @@
 
 選択 5 個程度のセッション 1 回で約 $0.005–0.015 (Gemini 3 Flash の入出力トークン換算、画像 5 枚 720px + 短いプロンプト + 構造化 JSON 出力)。30 個満載で $0.02–0.04 程度。
 
-## ローカル検出モデル (OIV7-601)
+## ローカル検出モデル (COCO-80)
 
-ローカル推論は **Ultralytics 公式 `yolov8n-oiv7.pt`** をベースに **512² 入力**で ONNX export + INT8 動的量子化 (per-tensor) したものを使用。601 クラスで COCO 80 を大きく上回るカバレッジを得つつ、量子化後 3.6 MB に収まる。
+ローカル推論は **Ultralytics 公式 `yolo11n.pt` (COCO-80)** をベースに **640² 入力**で ONNX export + INT8 動的量子化 (per-tensor) したものを使用。80 クラスとカバレッジは狭いが、クラスあたりの教師信号が密でリコールが高い。量子化後 ~2.9 MB。
 
-候補比較 (採用時の検討):
+設計判断: 「検出ラベルの細かさ」は **Gemini 詳細化 (`/api/refine-items`) に丸投げ**するため、YOLO 側は **bbox を確実に出すこと** を最重視。YOLO の表示ラベル ("ボトル" など) はユーザーがタップ対象を選ぶための粗いヒントで、確定ラベルは Gemini が返す `specific_name`。
 
-| データセット | クラス数 | 出力テンソル (FP32) | 公式重み入手 | 採否 |
-|---|---|---|---|---|
-| COCO (旧) | 80 | ~2.8 MB @640² | ✅ `yolo11n.pt` | 旧構成 |
-| **Open Images V7 (採用)** | **601** | **~13 MB @512²** | ✅ **`yolov8n-oiv7.pt`** | ✅ |
-| Objects365 | 365 | ~12 MB @640² | △ 部分的 | OIV7 が iOS で動かない場合の代替 |
-| LVIS | 1203 | ~40 MB @640² | △ community release | iOS メモリ危険のため不採用 |
+候補比較:
 
-入力解像度の選定経緯:
-- **640²**: 出力 ~20MB FP32 で iOS Safari の memory-pressure 閾値に当たり "Load failed" で落ちる
-- **416²**: 出力 ~8.5MB で iOS 動作するが、小さい物体・遠い物体の検出が顕著に落ちる
-- **512² (採用)**: 出力 ~13MB、iOS 動作圏内で 416² より明確に高精度
+| データセット | クラス数 | 出力テンソル (FP32) | 公式重み | リコール期待値 | 採否 |
+|---|---|---|---|---|---|
+| **COCO (採用)** | **80** | **~2.8 MB @640²** | ✅ `yolo11n.pt` | ◎ (密な教師) | ✅ |
+| Open Images V7 | 601 | ~13 MB @512² | ✅ `yolov8n-oiv7.pt` | △ (信号薄) | 旧構成 |
+| Objects365 | 365 | ~12 MB @640² | △ | ○ | 未試行 |
+| LVIS | 1203 | ~40 MB @640² | △ community | △ ロングテール | iOS メモリ危険 |
+
+入力解像度: COCO の出力テンソルは ~2.8MB と小さく、iOS の memory-pressure 余裕で **640² が可能**。OIV7 で 512² まで落としていた小物体リコールが復活。
 
 ### NMS は class-agnostic
 
-OIV7 には階層的クラス (`Bus` ⊂ `Land vehicle` ⊂ `Vehicle`、`Apple` ⊂ `Fruit` ⊂ `Food` 等) が大量にあり、一つの物体に複数の親クラスラベルが同時に発火する。class-aware NMS だと同じ箱に「バス」「陸上車両」「車両」が重なって画面が破綻するため、**class-agnostic NMS** (クラスを問わず IoU > 0.5 で抑制) を採用 (`src/yolo11.ts:postprocess`)。
+`bowl` と `cup` が同じマグカップに同時発火するような重複を抑える目的で class-agnostic NMS (IoU > 0.5 で抑制) を採用 (`src/yolo11.ts:postprocess`)。
 
-注: 公式リリースに `yolo11n-oiv7.pt` は存在しないため v8n ベース。出力フォーマットは v11 と同一の anchor-free 形式なので推論コード (`src/yolo11.ts`) はそのまま動作。ファイル名 `yolo11.ts` は歴史的経緯で残置。
+### SCORE_THRESHOLD = 0.15
+
+低めに設定。false positive (誤分類された箱) はユーザーが選ばないだけなので問題にならず、逆に **検出漏れ (= タップできない)** が UX に直結する。`?conf=N` で実行時上書き可能。
 
 ### モデル成果物 (リポジトリ外の export 手順、再生成する場合)
 
 ```python
 from ultralytics import YOLO
-m = YOLO('yolov8n-oiv7.pt')  # 公式重みを自動ダウンロード (6.9 MB)
-m.export(format='onnx', imgsz=512, opset=17, dynamic=False, simplify=True)
+m = YOLO('yolo11n.pt')  # 公式重みを自動ダウンロード (~5.2 MB)
+m.export(format='onnx', imgsz=640, opset=17, dynamic=False, simplify=True)
 
 from onnxruntime.quantization import quantize_dynamic, QuantType
 quantize_dynamic(
-    'yolov8n-oiv7.onnx',
-    'yolov8n_oiv7_512_uint8.onnx',
+    'yolo11n.onnx',
+    'yolo11n_coco_640_uint8.onnx',
     weight_type=QuantType.QUInt8,
     per_channel=False,  # per-tensor は onnxruntime-web WASM との相性が良い
 )
@@ -165,15 +166,15 @@ quantize_dynamic(
 ノートPC で数分、GPU 不要、fine-tuning 不要。
 
 成果物:
-- `public/models/yolov8n_oiv7_512_uint8.onnx` — 量子化済みモデル (~3.6 MB)
-- `src/oiv7-labels.ts` — 601 クラスの日本語ラベル配列 + `labelOf(classId)` ヘルパー
+- `public/models/yolo11n_coco_640_uint8.onnx` — 量子化済みモデル (~2.9 MB)
+- `src/coco-labels.ts` — 80 クラスの日本語ラベル配列 + `labelOf(classId)` ヘルパー
 
 ### 検証要件
 
 - iPhone 14 以降の実機で 5 分連続ライブ実行、タブキル無し
-- COCO 同等クラス (人、車、椅子、ノートPC等) の検出が旧構成と同等以上
-- 30 枚スナップショットを保持 → 詳細化 → 解放、までのメモリピーク < 250 MB
-- 機内モード時に詳細化が失敗 → YOLO ラベルでカート確定
+- 640² で iOS Safari がモデルロードに成功する (出力 ~2.8MB は memory-pressure 上限の十分内)
+- 「ボトル」「コップ」「ノートPC」「スマホ」「リモコン」「本」など COCO 主要クラスで bbox が出ること
+- 細かい物 (リップクリーム、USBケーブル等) は COCO に無いが、近隣の COCO クラスが箱を出してくれれば OK (タップ → Gemini が「リップクリーム」と返してくれる想定)
 
 ### ライセンス注意
 

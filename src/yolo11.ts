@@ -1,22 +1,25 @@
 import * as ort from 'onnxruntime-web/wasm';
-import { labelOf, OIV7_LABELS_JP } from './oiv7-labels';
+import { labelOf, COCO_LABELS_JP } from './coco-labels';
 import type { LiveBox } from './types';
 
-// 512² input is the middle ground for OIV7: the 640² output activation
-// (~20MB FP32) tripped iPhone WebKit's memory-pressure killer, but 416²
-// hurt small-object recall noticeably. At 512² the head is ~13MB.
-const INPUT_SIZE = 512;
-const NUM_CLASSES = OIV7_LABELS_JP.length; // 601 (Open Images V7)
-const NUM_ANCHORS = 5376; // 64*64 + 32*32 + 16*16
-// OIV7-trained YOLOv8n produces noticeably lower per-class sigmoid scores
-// than COCO-trained YOLOv11n on equivalent objects (601 classes spread the
-// supervision thinner), so 0.3 was filtering out almost everything in
-// real-world phone scenes. Default 0.2 with `?conf=N` override for tuning.
+// 640² with COCO-80: output [1, 84, 8400] ≈ 2.8MB FP32 — comfortably under
+// the iOS WebKit memory-pressure threshold. We tried OIV7 (601 classes) at
+// 512² earlier; recall was poor because per-class supervision was spread
+// thin and the larger output tensor forced us down to 512². With COCO the
+// math reverses: smaller class head + denser per-class training + room to
+// run at 640².
+const INPUT_SIZE = 640;
+const NUM_CLASSES = COCO_LABELS_JP.length; // 80
+const NUM_ANCHORS = 8400; // 80*80 + 40*40 + 20*20
+// Bias for recall: the user picks bboxes by tapping, and /api/refine-items
+// asks Gemini to identify what was actually selected, so coarse/wrong YOLO
+// labels are fine — but missing bboxes is fatal. Default 0.15 with `?conf=N`
+// override for tuning.
 const SCORE_THRESHOLD = (() => {
-  if (typeof window === 'undefined') return 0.2;
+  if (typeof window === 'undefined') return 0.15;
   const p = new URLSearchParams(window.location.search).get('conf');
   const n = p ? Number(p) : NaN;
-  return Number.isFinite(n) && n > 0 && n < 1 ? n : 0.2;
+  return Number.isFinite(n) && n > 0 && n < 1 ? n : 0.15;
 })();
 const NMS_IOU_THRESHOLD = 0.5;
 
@@ -39,7 +42,7 @@ ort.env.wasm.numThreads = 1;
 export async function loadModel(): Promise<{ backend: 'wasm' }> {
   if (session && activeBackend) return { backend: activeBackend };
 
-  const modelUrl = '/models/yolov8n_oiv7_512_uint8.onnx';
+  const modelUrl = '/models/yolo11n_coco_640_uint8.onnx';
 
   session = await ort.InferenceSession.create(modelUrl, {
     executionProviders: ['wasm'],
@@ -172,11 +175,11 @@ function postprocess(output: Float32Array, meta: LetterboxMeta): LiveBox[] {
     });
   }
 
-  // Class-agnostic NMS. OIV7 has heavily overlapping hierarchical classes
-  // (e.g. Bus + Land vehicle + Vehicle all fire on one bus), so allowing
-  // each class to keep its own bbox flooded the overlay with stacked
-  // labels. Suppressing overlap regardless of class keeps only the most
-  // confident label per location.
+  // Class-agnostic NMS — kept from the OIV7 era. COCO classes don't have
+  // the hierarchical-overlap problem (no Bus⊂Land vehicle⊂Vehicle stack),
+  // but class-agnostic still helps with two adjacent boxes that the model
+  // labels differently (e.g. "bowl" vs "cup" on the same mug) — we only
+  // want one box per physical thing.
   candidates.sort((a, b) => b.score - a.score);
   const kept: Candidate[] = [];
   const suppressed = new Uint8Array(candidates.length);
