@@ -13,11 +13,20 @@ export type LiveBox = {
 export type TrackedBox = LiveBox & { instance_id: number };
 
 // Per-item structured attributes returned by /api/refine-items after the user
-// finishes selecting. Only specific_name is guaranteed; the rest are best-effort.
+// finishes selecting. Mirrors the schema used by ImageModel (the dustalk
+// waste-disposal pipeline) so SmartCamera-collected items can flow into the
+// same downstream consumers without remapping fields.
+//
+// Only `name` is guaranteed; everything else may be an empty string when
+// Gemini couldn't read it from the snapshot. modelNumber is read for any
+// category; manufacturer/yearOfManufacture/capacity are only filled for the
+// "free pickup" categories (white goods + 2-wheelers) and stay empty
+// otherwise. The frontend renders whatever non-empty fields come back.
 export type RefinedItem = {
-  specific_name: string;
-  brand?: string;
-  category?: string;
-  color?: string;
-  size_estimate?: string;
+  name: string;
+  description?: string;
+  modelNumber?: string;
+  manufacturer?: string;
+  yearOfManufacture?: string;
+  capacity?: string;
 };

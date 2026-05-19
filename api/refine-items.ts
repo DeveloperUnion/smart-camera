@@ -8,16 +8,16 @@ const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 
 const MAX_ITEMS = 30;
 
-// gemini-3-flash-preview was returning 503 UNAVAILABLE intermittently — it's
-// a preview model and capacity is spotty. gemini-2.5-flash is GA, supports
-// the same multimodal + responseSchema combo we need, and has been reliable.
-// Override via env if a different model is needed for an experiment.
-const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+// Primary/fallback pair mirrors the dustalk ImageModel service: when the
+// primary returns 503 UNAVAILABLE we silently fail over to a smaller GA
+// model that has spare capacity. Override either via env for experiments.
+const PRIMARY_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+const FALLBACK_MODEL =
+  process.env.GEMINI_FALLBACK_MODEL || 'gemini-2.5-flash-lite';
 
-// Transient errors from Gemini (mostly 503/UNAVAILABLE, occasionally 429
-// rate-limit) are best handled with short backoff rather than bubbled up —
-// the user has already pressed "stop" and is staring at a spinner, so a
-// few extra seconds beats failing the whole batch.
+// Transient errors from Gemini (mostly 503/UNAVAILABLE, occasionally 429)
+// retry-with-backoff first; if every retry on the primary still fails the
+// caller below falls over to the fallback model.
 function isTransient(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const m = err.message;
@@ -42,18 +42,37 @@ type IncomingItem = {
   bbox: [number, number, number, number]; // 0-1 normalized
 };
 
+// Prompt deliberately mirrors the ImageModel waste-disposal pipeline so
+// downstream consumers (dustalk-infra, DustalkChat) see the same field
+// vocabulary regardless of whether items came from full-image detection
+// or per-tap SmartCamera selection. Difference from ImageModel: that
+// service detects all objects in one frame and returns box_2d per item;
+// here the user has already pointed at one object per image, so we drop
+// the box requirement and just identify what was selected.
 const PROMPT_PREAMBLE = [
-  '以下の画像はユーザーがライブカメラから選択した物体です。各画像で bbox 領域 (画像上の正規化座標) に映る物体を、可能な限り具体的に同定してください。',
+  '以下の画像はユーザーがライブカメラから選択した、捨てる対象になりうる物体です。各画像で bbox 領域 (画像上の正規化 xyxy 座標、0-1 スケール) を中心に映る物体を 1 つ同定してください。家具 (机、椅子、棚など)・家電・オフィス機器・生活用品が主な対象。壁・床・天井など建物の構造部分は対象外。',
   '',
-  '判定ガイド:',
-  '- bbox は物体のおおよその位置のヒント。画像全体を見て、最も自然な解釈を選ぶこと。',
-  '- yolo_label は YOLO による粗い分類のヒント (例: 「缶」「ボトル」「マグカップ」)。参考にしてよいが、より具体的に特定できればそちらを優先。',
-  '- specific_name は短い日本語の名詞句で、商品名・型番・材質などが分かれば含める (例: 「コカコーラ缶 350ml」「無印良品 アクリルマグ 白」「青色プラスチック製ボールペン」)。',
-  '- brand はロゴ等から確信を持って読み取れる場合のみ。曖昧なら省略。',
-  '- category は日常用途の大分類 (例: 飲料、文房具、食器、衣類、電化製品)。',
-  '- color は最も支配的な色を簡潔に。',
-  '- size_estimate は画像内の他物体や手のスケール等から推定 (例: 「直径6cm程度」「A4サイズ」)。確信が低ければ省略。',
-  '- 確信が持てない属性は省略。specific_name だけは必ず埋める (どうしても判らなければ yolo_label をそのまま日本語名詞句として返す)。',
+  '同定方針:',
+  '- 物体の一部 (ボタン配列、受話器、脚など) しか写っていなくても、形状や文脈から確信を持って種類を特定できる場合は同定してください。',
+  '- 形状や文脈から自信を持って特定できない場合は、無理に推測せず name を「不明」としてください (誤同定を避ける)。',
+  '- name はカテゴリ表記 (例:「複合機」「ビジネスフォン」「ソファ」「冷蔵庫」「ペットボトル」) にとどめ、型番やメーカー名は含めないでください。',
+  '- description は物体の説明 (形状・用途の補足) のみ。型番・メーカー・年式・容量などの構造化フィールドに入る情報は description に含めないでください。',
+  '- yolo_label は YOLO による粗い分類のヒント。参考にしてよいが、画像から自信を持って別カテゴリと判断できればそちらを優先。',
+  '',
+  '構造化フィールド (読み取れた場合のみ埋める。読み取れない・確信がない場合は必ず空文字 "" にする。推測禁止):',
+  '- modelNumber: 銘板・ラベルから読み取れる製品型番 (例:「RICOH IM C4510」「NR-F500A」)。全カテゴリ対象。',
+  '',
+  '以下の属性は **無料引取候補カテゴリのみ** 対象。それ以外のカテゴリでは必ず空文字にしてください。',
+  '対象カテゴリ: 冷蔵庫 / 冷凍庫 / 洗濯機 / 乾燥機 / エアコン / テレビ / 電子レンジ / オーブンレンジ / 自転車 / 電動アシスト / バイク / スクーター',
+  '',
+  '- manufacturer: 銘板・ロゴから確信できるメーカー名 (例:「Panasonic」「日立」「シャープ」)。',
+  '- yearOfManufacture: 銘板の製造年月などから確信できる年式 (例:「2020」)。型番から年式が一意に決まる場合のみ型番由来でも可。',
+  '- capacity: 確信できる容量。単位はカテゴリ別に必ず以下に従う:',
+  '  - 冷蔵庫 / 冷凍庫 / 電子レンジ / オーブンレンジ → L (例:「300L」「500L」)',
+  '  - 洗濯機 / 乾燥機 → kg (例:「7kg」「9kg」)',
+  '  - エアコン → 畳数 (例:「6畳」「10畳」)',
+  '  - テレビ → 型 または インチ (例:「32型」「55インチ」)',
+  '  - 自転車 / 電動アシスト / バイク / スクーター → 容量は空文字 (メーカー・年式のみ対象)',
   '',
   '返却は items 配列で、items[i].id はリクエストで指定された id を必ず維持すること。',
   '',
@@ -72,13 +91,46 @@ const RESPONSE_SCHEMA = {
           refined: {
             type: Type.OBJECT,
             properties: {
-              specific_name: { type: Type.STRING },
-              brand: { type: Type.STRING },
-              category: { type: Type.STRING },
-              color: { type: Type.STRING },
-              size_estimate: { type: Type.STRING },
+              name: {
+                type: Type.STRING,
+                description:
+                  '物体のカテゴリ名 (例:「複合機」「ビジネスフォン」「ソファ」「冷蔵庫」)。型番・メーカー名・容量は含めない。判別不能なら「不明」。',
+              },
+              description: {
+                type: Type.STRING,
+                description:
+                  '物体の説明文。形状や用途の補足のみ。型番・メーカー・年式・容量はここに含めず、専用フィールドに入れる。',
+              },
+              modelNumber: {
+                type: Type.STRING,
+                description:
+                  '銘板・ラベルから読み取れる製品型番 (例:「RICOH IM C4510」「NR-F500A」)。読み取れない場合は必ず空文字。',
+              },
+              manufacturer: {
+                type: Type.STRING,
+                description:
+                  '無料引取候補カテゴリ (冷蔵庫/冷凍庫/洗濯機/乾燥機/エアコン/テレビ/電子レンジ/オーブンレンジ/自転車/電動アシスト/バイク/スクーター) に限り、銘板・ロゴから確信できるメーカー名。それ以外のカテゴリや読み取れない場合は必ず空文字。',
+              },
+              yearOfManufacture: {
+                type: Type.STRING,
+                description:
+                  '上記対象カテゴリに限り、銘板の製造年月などから確信できる年式 (例:「2020」)。それ以外や読み取れない場合は必ず空文字。',
+              },
+              capacity: {
+                type: Type.STRING,
+                description:
+                  '上記対象カテゴリに限り、確信できる容量。単位はカテゴリ別に冷蔵庫/冷凍庫/電子レンジ/オーブンレンジ=L、洗濯機/乾燥機=kg、エアコン=畳数、テレビ=型/インチ。自転車・バイク類および対象外カテゴリ、読み取れない場合は必ず空文字。',
+              },
             },
-            required: ['specific_name'],
+            required: ['name'],
+            propertyOrdering: [
+              'name',
+              'description',
+              'modelNumber',
+              'manufacturer',
+              'yearOfManufacture',
+              'capacity',
+            ],
           },
         },
         required: ['id', 'refined'],
@@ -90,6 +142,56 @@ const RESPONSE_SCHEMA = {
 
 function fmtBbox(b: [number, number, number, number]): string {
   return `[${b.map((n) => n.toFixed(3)).join(', ')}]`;
+}
+
+// Type for the multimodal `parts` array we send Gemini.
+type Part =
+  | { text: string }
+  | { inlineData: { data: string; mimeType: string } };
+
+async function callGeminiWithFallback(
+  parts: Part[],
+): Promise<{ text: string; modelUsed: string }> {
+  const models = [PRIMARY_MODEL, FALLBACK_MODEL].filter(
+    (m, i, a) => m && a.indexOf(m) === i,
+  );
+  const backoffs = [500, 1500, 4000];
+  let lastErr: unknown;
+
+  for (const model of models) {
+    for (let attempt = 0; attempt < backoffs.length; attempt++) {
+      try {
+        const response = await ai!.models.generateContent({
+          model,
+          contents: [{ role: 'user', parts }],
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: RESPONSE_SCHEMA,
+          },
+        });
+        if (model !== PRIMARY_MODEL) {
+          console.info('refine-items: used fallback model', model);
+        }
+        return { text: response.text ?? '{"items":[]}', modelUsed: model };
+      } catch (err) {
+        lastErr = err;
+        if (!isTransient(err)) throw err;
+        if (attempt === backoffs.length - 1) {
+          console.warn(
+            `refine-items: ${model} exhausted retries on transient error, trying next model`,
+            err instanceof Error ? err.message : err,
+          );
+          break;
+        }
+        console.warn(
+          `refine-items: ${model} transient error (attempt ${attempt + 1}), retrying in ${backoffs[attempt]}ms`,
+          err instanceof Error ? err.message : err,
+        );
+        await sleep(backoffs[attempt]);
+      }
+    }
+  }
+  throw lastErr ?? new Error('all models failed');
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -125,13 +227,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   // Build a single multimodal turn: one preamble text part, then alternating
-  // [text describing item], [inline image] pairs so the model can ground each
-  // image to its id + yolo_label + bbox without relying on positional order
-  // alone.
-  const parts: Array<
-    | { text: string }
-    | { inlineData: { data: string; mimeType: string } }
-  > = [{ text: PROMPT_PREAMBLE }];
+  // [text describing item], [inline image] pairs so the model can ground
+  // each image to its id + yolo_label + bbox without relying on positional
+  // order alone.
+  const parts: Part[] = [{ text: PROMPT_PREAMBLE }];
   for (const it of items) {
     parts.push({
       text: `id=${it.id}, yolo_label="${it.yolo_label}", bbox=${fmtBbox(it.bbox)}`,
@@ -145,45 +244,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    // 3 attempts with exponential backoff for transient capacity errors.
-    // Total worst-case wait before giving up: ~0.5 + 1.5 + 4 = 6s, which
-    // sits comfortably inside our 60s function budget.
-    const backoffs = [500, 1500, 4000];
-    let response;
-    let lastErr: unknown;
-    for (let attempt = 0; attempt < backoffs.length; attempt++) {
-      try {
-        response = await ai.models.generateContent({
-          model: MODEL,
-          contents: [{ role: 'user', parts }],
-          config: {
-            responseMimeType: 'application/json',
-            responseSchema: RESPONSE_SCHEMA,
-          },
-        });
-        break;
-      } catch (err) {
-        lastErr = err;
-        if (attempt === backoffs.length - 1 || !isTransient(err)) throw err;
-        console.warn(
-          `refine-items transient error (attempt ${attempt + 1}), retrying in ${backoffs[attempt]}ms:`,
-          err instanceof Error ? err.message : err,
-        );
-        await sleep(backoffs[attempt]);
-      }
-    }
-    if (!response) throw lastErr ?? new Error('no response');
+    const { text } = await callGeminiWithFallback(parts);
 
-    const text = response.text ?? '{"items":[]}';
     const parsed = JSON.parse(text) as {
       items?: Array<{
         id: number;
         refined?: {
-          specific_name?: string;
-          brand?: string;
-          category?: string;
-          color?: string;
-          size_estimate?: string;
+          name?: string;
+          description?: string;
+          modelNumber?: string;
+          manufacturer?: string;
+          yearOfManufacture?: string;
+          capacity?: string;
         };
       }>;
     };
@@ -193,26 +265,31 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         (r) =>
           typeof r.id === 'number' &&
           r.refined &&
-          typeof r.refined.specific_name === 'string' &&
-          r.refined.specific_name.length > 0,
+          typeof r.refined.name === 'string' &&
+          r.refined.name.length > 0,
       )
-      .map((r) => ({
-        id: r.id,
-        refined: {
-          specific_name: r.refined!.specific_name!,
-          brand: r.refined!.brand,
-          category: r.refined!.category,
-          color: r.refined!.color,
-          size_estimate: r.refined!.size_estimate,
-        },
-      }));
+      .map((r) => {
+        const refined = r.refined!;
+        // Strip empty strings so the client only renders non-empty fields,
+        // matching the spec's "省略可能 if 空文字" intent.
+        const trimmed: Record<string, string> = { name: refined.name! };
+        for (const k of [
+          'description',
+          'modelNumber',
+          'manufacturer',
+          'yearOfManufacture',
+          'capacity',
+        ] as const) {
+          const v = refined[k];
+          if (typeof v === 'string' && v.length > 0) trimmed[k] = v;
+        }
+        return { id: r.id, refined: trimmed };
+      });
 
     res.status(200).json({ items: out });
   } catch (e) {
     console.error('refine-items error', e);
     const msg = e instanceof Error ? e.message : 'inference failed';
-    // Surface 503 distinctly so the client can show "Geminiが混み合っています"
-    // rather than a generic failure.
     const status = isTransient(e) ? 503 : 500;
     res.status(status).json({ error: msg });
   }

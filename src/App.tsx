@@ -51,17 +51,24 @@ type CartEntry = {
 };
 
 function displayLabel(e: CartEntry): string {
-  return e.refined?.specific_name ?? e.yolo_label;
+  return e.refined?.name ?? e.yolo_label;
 }
 
-function refinedSubline(r?: RefinedItem): string {
-  if (!r) return '';
-  const parts: string[] = [];
-  if (r.brand) parts.push(r.brand);
-  if (r.color) parts.push(r.color);
-  if (r.size_estimate) parts.push(r.size_estimate);
-  if (r.category) parts.push(r.category);
-  return parts.join(' · ');
+// Returns ordered sublines for the cart row. The first non-empty subline
+// becomes line 2; remaining ones can be shown as line 3 if we want, but
+// for now we collapse everything past the model number into one " · "
+// joined line to stay compact on phones.
+function refinedSublines(r?: RefinedItem): string[] {
+  if (!r) return [];
+  const lines: string[] = [];
+  if (r.modelNumber) lines.push(r.modelNumber);
+  if (r.description) lines.push(r.description);
+  const attrs: string[] = [];
+  if (r.manufacturer) attrs.push(r.manufacturer);
+  if (r.yearOfManufacture) attrs.push(`${r.yearOfManufacture}年`);
+  if (r.capacity) attrs.push(r.capacity);
+  if (attrs.length) lines.push(attrs.join(' · '));
+  return lines;
 }
 
 export default function App() {
@@ -494,19 +501,23 @@ export default function App() {
           ) : (
             <ul className="cart">
               {cartGroups.map(([label, { ids, entry }]) => {
-                const sub = refinedSubline(entry.refined);
+                const sublines = refinedSublines(entry.refined);
                 return (
                   <li key={label}>
                     <span className="label">
                       {label}
-                      {sub && (
-                        <>
-                          <br />
-                          <span style={{ fontSize: 12, color: '#888' }}>
-                            {sub}
-                          </span>
-                        </>
-                      )}
+                      {sublines.map((line, i) => (
+                        <span
+                          key={i}
+                          style={{
+                            display: 'block',
+                            fontSize: 12,
+                            color: '#888',
+                          }}
+                        >
+                          {line}
+                        </span>
+                      ))}
                     </span>
                     <span className="count">× {ids.length}</span>
                     <button
