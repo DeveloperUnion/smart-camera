@@ -1,6 +1,6 @@
 {
   "functions": {
-    "api/detect-video.ts": {
+    "api/refine-items.ts": {
       "maxDuration": 60
     }
   }
