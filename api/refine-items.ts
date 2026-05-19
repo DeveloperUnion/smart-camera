@@ -8,6 +8,32 @@ const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 
 const MAX_ITEMS = 30;
 
+// gemini-3-flash-preview was returning 503 UNAVAILABLE intermittently — it's
+// a preview model and capacity is spotty. gemini-2.5-flash is GA, supports
+// the same multimodal + responseSchema combo we need, and has been reliable.
+// Override via env if a different model is needed for an experiment.
+const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+
+// Transient errors from Gemini (mostly 503/UNAVAILABLE, occasionally 429
+// rate-limit) are best handled with short backoff rather than bubbled up —
+// the user has already pressed "stop" and is staring at a spinner, so a
+// few extra seconds beats failing the whole batch.
+function isTransient(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const m = err.message;
+  return (
+    m.includes('503') ||
+    m.includes('UNAVAILABLE') ||
+    m.includes('overloaded') ||
+    m.includes('429') ||
+    m.includes('RESOURCE_EXHAUSTED')
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 type IncomingItem = {
   id: number;
   yolo_label: string;
@@ -119,14 +145,34 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: [{ role: 'user', parts }],
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: RESPONSE_SCHEMA,
-      },
-    });
+    // 3 attempts with exponential backoff for transient capacity errors.
+    // Total worst-case wait before giving up: ~0.5 + 1.5 + 4 = 6s, which
+    // sits comfortably inside our 60s function budget.
+    const backoffs = [500, 1500, 4000];
+    let response;
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < backoffs.length; attempt++) {
+      try {
+        response = await ai.models.generateContent({
+          model: MODEL,
+          contents: [{ role: 'user', parts }],
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: RESPONSE_SCHEMA,
+          },
+        });
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (attempt === backoffs.length - 1 || !isTransient(err)) throw err;
+        console.warn(
+          `refine-items transient error (attempt ${attempt + 1}), retrying in ${backoffs[attempt]}ms:`,
+          err instanceof Error ? err.message : err,
+        );
+        await sleep(backoffs[attempt]);
+      }
+    }
+    if (!response) throw lastErr ?? new Error('no response');
 
     const text = response.text ?? '{"items":[]}';
     const parsed = JSON.parse(text) as {
@@ -165,6 +211,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   } catch (e) {
     console.error('refine-items error', e);
     const msg = e instanceof Error ? e.message : 'inference failed';
-    res.status(500).json({ error: msg });
+    // Surface 503 distinctly so the client can show "Geminiが混み合っています"
+    // rather than a generic failure.
+    const status = isTransient(e) ? 503 : 500;
+    res.status(status).json({ error: msg });
   }
 }

@@ -306,6 +306,9 @@ export default function App() {
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
+        if (res.status === 503) {
+          throw new Error('Geminiが一時的に混み合っています。少し時間をおいて再試行してください。');
+        }
         throw new Error(body?.error || `HTTP ${res.status}`);
       }
       const data = (await res.json()) as {
