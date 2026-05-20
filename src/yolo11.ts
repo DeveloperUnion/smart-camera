@@ -1,27 +1,44 @@
 import * as ort from 'onnxruntime-web/wasm';
-import { labelOf, COCO_LABELS_JP } from './coco-labels';
 import type { LiveBox } from './types';
 
-// 640² with COCO-80: output [1, 84, 8400] ≈ 2.8MB FP32 — comfortably under
-// the iOS WebKit memory-pressure threshold. We tried OIV7 (601 classes) at
-// 512² earlier; recall was poor because per-class supervision was spread
-// thin and the larger output tensor forced us down to 512². With COCO the
-// math reverses: smaller class head + denser per-class training + room to
-// run at 640².
+// FastSAM-s: YOLOv8s-seg architecture trained on SA-1B (Segment Anything's
+// 1.1B-mask dataset). It's a single-class ("object") detector — every anchor
+// just predicts "is there an object here?" — so it puts bboxes around things
+// regardless of category. That's exactly what we want for the cart workflow:
+// YOLO finds boxes, the user taps the interesting ones, and Gemini decides
+// what each actually is via /api/refine-items. Coverage is no longer capped
+// by COCO's 80 / OIV7's 601 trained classes; if it's a physical object,
+// it'll get a box.
+//
+// File name `yolo11.ts` is kept for git/history continuity even though we're
+// now running a YOLOv8-seg derivative — the preprocess pipeline (letterbox,
+// 114-gray pad, RGB CHW, /255) is identical so the rename would just churn
+// callers.
 const INPUT_SIZE = 640;
-const NUM_CLASSES = COCO_LABELS_JP.length; // 80
+// Single class ("object"). FastSAM-s' name table is just {0: "object"} —
+// keeping NUM_CLASSES around for documentation, not used in postprocess
+// since there's no per-class argmax anymore.
+const NUM_CLASSES = 1;
 const NUM_ANCHORS = 8400; // 80*80 + 40*40 + 20*20
-// Bias for recall: the user picks bboxes by tapping, and /api/refine-items
-// asks Gemini to identify what was actually selected, so coarse/wrong YOLO
-// labels are fine — but missing bboxes is fatal. Default 0.15 with `?conf=N`
-// override for tuning.
+// Class-agnostic objectness from a model trained on "anything visible" runs
+// noticeably lower confidence values than COCO YOLO did on its 80 trained
+// classes. Default to a low threshold and lean on NMS + visual decluttering
+// to keep the overlay legible. `?conf=N` overrides at runtime.
 const SCORE_THRESHOLD = (() => {
-  if (typeof window === 'undefined') return 0.15;
+  if (typeof window === 'undefined') return 0.1;
   const p = new URLSearchParams(window.location.search).get('conf');
   const n = p ? Number(p) : NaN;
-  return Number.isFinite(n) && n > 0 && n < 1 ? n : 0.15;
+  return Number.isFinite(n) && n > 0 && n < 1 ? n : 0.1;
 })();
 const NMS_IOU_THRESHOLD = 0.5;
+
+// FastSAM output shape is `[1, 4+1+32, 8400]` (4 box + 1 objectness + 32 mask
+// coefficients). We don't render masks so we slice off the coefficients and
+// only read up to channel index 5. The proto-mask output (`output1`) is
+// ignored entirely — onnxruntime-web allocates it but we just don't dereference
+// it past the dispose() call.
+const NUM_CHANNELS_PER_ANCHOR = 4 + NUM_CLASSES; // 5 — we read [0..4]
+void NUM_CHANNELS_PER_ANCHOR; // silence unused-var lint, here for docs
 
 let session: ort.InferenceSession | null = null;
 let activeBackend: 'wasm' | null = null;
@@ -29,9 +46,9 @@ let activeBackend: 'wasm' | null = null;
 // Reused per-call buffers — allocated once at module init.
 const inputBuffer = new Float32Array(3 * INPUT_SIZE * INPUT_SIZE);
 
-// Use the wasm-only build (no WebGPU asyncify). The bundled webgpu variant is
-// ~23MB and pushes iPhone WebKit over its memory-pressure tab-kill threshold
-// during model load. The wasm-only artifacts are ~10MB or less.
+// Use the wasm-only build (no WebGPU asyncify). The bundled webgpu variant
+// is ~23MB and pushes iPhone WebKit over its memory-pressure tab-kill
+// threshold during model load.
 ort.env.wasm.wasmPaths =
   'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.3/dist/';
 // Pin to a single thread — iPhone WebKit cannot use SharedArrayBuffer without
@@ -42,7 +59,7 @@ ort.env.wasm.numThreads = 1;
 export async function loadModel(): Promise<{ backend: 'wasm' }> {
   if (session && activeBackend) return { backend: activeBackend };
 
-  const modelUrl = '/models/yolo11n_coco_640_uint8.onnx';
+  const modelUrl = '/models/fastsam_s_640_uint8.onnx';
 
   session = await ort.InferenceSession.create(modelUrl, {
     executionProviders: ['wasm'],
@@ -62,8 +79,8 @@ type LetterboxMeta = {
 
 let scratchCtx: CanvasRenderingContext2D | null = null;
 
-// YOLO11 expects letterbox-resized 640x640 with 114 gray padding,
-// values normalized to [0, 1], RGB channels-first.
+// YOLO expects letterbox-resized 640x640 with 114 gray padding, RGB
+// channels-first normalized to [0, 1]. FastSAM uses the same preprocess.
 function preprocess(
   video: HTMLVideoElement,
   scratch: HTMLCanvasElement,
@@ -84,7 +101,6 @@ function preprocess(
   const padX = (INPUT_SIZE - dw) / 2;
   const padY = (INPUT_SIZE - dh) / 2;
 
-  // Fill with YOLO's gray padding color so border anchors don't fire.
   ctx.fillStyle = 'rgb(114, 114, 114)';
   ctx.fillRect(0, 0, INPUT_SIZE, INPUT_SIZE);
   ctx.drawImage(video, padX, padY, dw, dh);
@@ -106,7 +122,6 @@ type Candidate = {
   x2: number;
   y2: number;
   score: number;
-  classId: number;
 };
 
 function iou(a: Candidate, b: Candidate): number {
@@ -121,33 +136,29 @@ function iou(a: Candidate, b: Candidate): number {
   return inter / (aArea + bArea - inter);
 }
 
-// Diagnostic counters from the last postprocess pass — exposed to the
-// debug overlay so we can tell "model produced nothing" from "threshold
-// rejected everything" when triaging recall issues.
+// Diagnostic counters from the last postprocess pass — exposed to the debug
+// overlay so we can tell "model produced nothing" from "threshold rejected
+// everything" when triaging recall issues.
 export let lastMaxScore = 0;
 export let lastRawCount = 0;
 export let lastKeptCount = 0;
 
-// Output shape [1, 4+NUM_CLASSES, NUM_ANCHORS]: 4 box (cx,cy,w,h in input
-// pixel space) + per-class scores per anchor. Class scores are already
-// sigmoid'd by the Ultralytics ONNX export.
+// Output shape [1, 37, NUM_ANCHORS]: 4 box (cx,cy,w,h in input pixel space)
+// + 1 objectness score + 32 mask coefficients (ignored — we only need
+// bboxes). The objectness is already sigmoid'd by the Ultralytics ONNX
+// export.
 function postprocess(output: Float32Array, meta: LetterboxMeta): LiveBox[] {
   const candidates: Candidate[] = [];
   const stride = NUM_ANCHORS;
   let frameMaxScore = 0;
 
+  // Channel 4 = objectness. No per-class argmax loop anymore — class-agnostic
+  // detection collapses what used to be ~600 channel reads per anchor down
+  // to one.
   for (let i = 0; i < NUM_ANCHORS; i++) {
-    let bestClass = 0;
-    let bestScore = output[4 * stride + i];
-    for (let c = 1; c < NUM_CLASSES; c++) {
-      const v = output[(4 + c) * stride + i];
-      if (v > bestScore) {
-        bestScore = v;
-        bestClass = c;
-      }
-    }
-    if (bestScore > frameMaxScore) frameMaxScore = bestScore;
-    if (bestScore < SCORE_THRESHOLD) continue;
+    const score = output[4 * stride + i];
+    if (score > frameMaxScore) frameMaxScore = score;
+    if (score < SCORE_THRESHOLD) continue;
 
     const cx = output[i];
     const cy = output[stride + i];
@@ -170,16 +181,10 @@ function postprocess(output: Float32Array, meta: LetterboxMeta): LiveBox[] {
       y1: Math.max(0, Math.min(meta.vh, y1)),
       x2: Math.max(0, Math.min(meta.vw, x2)),
       y2: Math.max(0, Math.min(meta.vh, y2)),
-      score: bestScore,
-      classId: bestClass,
+      score,
     });
   }
 
-  // Class-agnostic NMS — kept from the OIV7 era. COCO classes don't have
-  // the hierarchical-overlap problem (no Bus⊂Land vehicle⊂Vehicle stack),
-  // but class-agnostic still helps with two adjacent boxes that the model
-  // labels differently (e.g. "bowl" vs "cup" on the same mug) — we only
-  // want one box per physical thing.
   candidates.sort((a, b) => b.score - a.score);
   const kept: Candidate[] = [];
   const suppressed = new Uint8Array(candidates.length);
@@ -198,11 +203,13 @@ function postprocess(output: Float32Array, meta: LetterboxMeta): LiveBox[] {
   lastRawCount = candidates.length;
   lastKeptCount = kept.length;
 
+  // All boxes share a generic label — the model is class-agnostic and the
+  // actual identification happens later in /api/refine-items.
   return kept.map((c) => ({
     bbox: [c.x1, c.y1, c.x2, c.y2],
     score: c.score,
-    classId: c.classId,
-    label: labelOf(c.classId),
+    classId: 0,
+    label: '物体',
   }));
 }
 
@@ -225,6 +232,10 @@ export async function detect(
   let results: ort.InferenceSession.OnnxValueMapType | null = null;
   try {
     results = await session.run({ [inputName]: tensor });
+    // FastSAM emits two outputs (`output0` det head, `output1` proto masks).
+    // We only consume the det head; the proto branch's allocation is paid
+    // for either way but we don't read or hold a reference to it past the
+    // dispose() call in the finally block.
     const output = results[session.outputNames[0]].data as Float32Array;
     return postprocess(output, meta);
   } finally {
