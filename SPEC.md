@@ -2,10 +2,10 @@
 
 スマホブラウザで動く、物体検知 + カゴ追加アプリ。**ローカル YOLO + Gemini 詳細化のハイブリッド**:
 
-1. ライブカメラに対し on-device で **FastSAM-s** (class-agnostic objectness, 単一クラス "物体") を毎フレーム (~3fps) 実行、bbox を重畳表示
-2. ユーザーがタップ → bbox 内のフレームをスナップショット (フルフレーム JPEG + bbox メタ) として保持。カートには即座に "物体" として追加
-3. 「停止」タップ → スナップショット群を 1 リクエストで Gemini に送り、各物体の構造化属性 (`name`, `description`, `modelNumber`, `manufacturer`, `yearOfManufacture`, `capacity`) を取得
-4. カート画面で Gemini の `name` (カテゴリ表記) と補助属性を表示
+1. ライブカメラに対し on-device で YOLOv11n-COCO (80 クラス) を毎フレーム (~3fps) 実行、bbox + 粗い日本語ラベルを重畳表示
+2. ユーザーがタップ → bbox 内のフレームをスナップショット (フルフレーム JPEG + bbox メタ) として保持。カートには即座に YOLO ラベルが追加される
+3. 「停止」タップ → スナップショット群を 1 リクエストで Gemini 3 Flash に送り、各物体の構造化属性 (`specific_name`, `brand`, `category`, `color`, `size_estimate`) を取得
+4. カート画面で YOLO ラベルを Gemini の `specific_name` で置き換え、補助属性を 2 行目に表示
 
 オフラインや API 失敗時は YOLO ラベルで確定する (フォールバック)。
 
@@ -27,7 +27,7 @@
 | 領域 | 採用 |
 |---|---|
 | フロント | React 19 + Vite + TypeScript |
-| ローカル推論 | FastSAM-s INT8 ONNX (class-agnostic, 単一クラス), `onnxruntime-web` WASM |
+| ローカル推論 | YOLOv11n-COCO INT8 ONNX (80 クラス), `onnxruntime-web` WASM |
 | 詳細化 | Gemini 3 Flash (`@google/genai`, multimodal) |
 | サーバ | Vercel Serverless Function (`/api/refine-items`) |
 | カメラ | `getUserMedia` (`facingMode: 'environment'`) |
@@ -122,84 +122,60 @@
 
 選択 5 個程度のセッション 1 回で約 $0.005–0.015 (Gemini 3 Flash の入出力トークン換算、画像 5 枚 720px + 短いプロンプト + 構造化 JSON 出力)。30 個満載で $0.02–0.04 程度。
 
-## ローカル検出モデル (FastSAM-s, class-agnostic)
+## ローカル検出モデル (COCO-80)
 
-ローカル推論は **FastSAM-s** (Ultralytics 配布の `FastSAM-s.pt`) を **640² 入力**で ONNX export + INT8 動的量子化 (per-tensor) したものを使用。
+ローカル推論は **Ultralytics 公式 `yolo11n.pt` (COCO-80)** をベースに **640² 入力**で ONNX export + INT8 動的量子化 (per-tensor) したものを使用。80 クラスとカバレッジは狭いが、クラスあたりの教師信号が密でリコールが高い。量子化後 ~2.9 MB。
 
-### なぜ FastSAM か
+設計判断: 「検出ラベルの細かさ」は **Gemini 詳細化 (`/api/refine-items`) に丸投げ**するため、YOLO 側は **bbox を確実に出すこと** を最重視。YOLO の表示ラベル ("ボトル" など) はユーザーがタップ対象を選ぶための粗いヒントで、確定ラベルは Gemini が返す `specific_name`。
 
-FastSAM-s は YOLOv8s-seg アーキテクチャを **SA-1B (Segment Anything Model の 1.1 億マスクデータセット)** で再訓練したモデルで、教師タスクが「画像内の全物体に箱とマスクを引く」そのもの。
+候補比較:
 
-**class-agnostic** (単一クラス "object"): 何クラスに属するかは予測しない。「ここに物体がある」だけを出力する。クラス頭がないので per-anchor argmax ループも不要 (postprocess が単純化)。
-
-これは SmartCamera の方針 — **「ラベルは Gemini に丸投げ、YOLO は箱だけ出す」** — と完全に噛み合う。COCO 80 クラス / OIV7 601 クラスのような訓練範囲制約が消え、写った物体には基本的に箱が立つ。
-
-### 候補比較 (検討時)
-
-| モデル | クラス数 | INT8 サイズ | 出力テンソル | 設計 | 採否 |
+| データセット | クラス数 | 出力テンソル (FP32) | 公式重み | リコール期待値 | 採否 |
 |---|---|---|---|---|---|
-| **FastSAM-s (採用)** | **1 (class-agnostic)** | **~12 MB** | **~1.2 MB @640²** | YOLOv8s-seg を SA-1B で訓練 | ✅ |
-| YOLOv11n-COCO | 80 | ~3 MB | ~2.8 MB | COCO 訓練、密な教師信号 | 旧構成、COCO 範囲外で recall 不足 |
-| YOLOv8n-OIV7 | 601 | ~3.6 MB | ~13 MB @512² | OIV7 訓練、階層クラス | 旧旧構成、per-class 信号薄でスコア低 |
-| MobileSAM / EdgeSAM | 1 | ~10 MB | varies | ViT-tiny に SAM 蒸留、prompt-based | "全物体モード" は grid-sample で重い |
-| FastSAM-x | 1 | ~40 MB | larger | FastSAM 大型版 | iOS で動作圏外 |
-| YOLOE-S | open-vocab | ~10 MB | varies | 2024 新顔、prompt-free 可 | ONNX export 未成熟、将来候補 |
+| **COCO (採用)** | **80** | **~2.8 MB @640²** | ✅ `yolo11n.pt` | ◎ (密な教師) | ✅ |
+| Open Images V7 | 601 | ~13 MB @512² | ✅ `yolov8n-oiv7.pt` | △ (信号薄) | 旧構成 |
+| Objects365 | 365 | ~12 MB @640² | △ | ○ | 未試行 |
+| LVIS | 1203 | ~40 MB @640² | △ community | △ ロングテール | iOS メモリ危険 |
 
-### モデル出力形状
-
-```
-output0: [1, 37, 8400]
-  channels[0:4]   = cx, cy, w, h (640px space)
-  channels[4]     = objectness (sigmoid'd)
-  channels[5:37]  = 32 マスク係数 ← 読まない
-output1: [1, 32, 160, 160]    # proto masks ← 読まない
-```
-
-`output1` (~3.3MB FP32) と `output0` のマスク係数部分は ORT が allocate するが我々は dereference しない。実質的な活性化メモリ使用量は YOLO COCO とほぼ同等。
-
-### SCORE_THRESHOLD = 0.1
-
-class-agnostic objectness は COCO YOLO の per-class score より絶対値が低めに出るので閾値も下げる。false positive は「タップされないだけ」なのでコストはなく、recall を優先。`?conf=N` で上書き可。
+入力解像度: COCO の出力テンソルは ~2.8MB と小さく、iOS の memory-pressure 余裕で **640² が可能**。OIV7 で 512² まで落としていた小物体リコールが復活。
 
 ### NMS は class-agnostic
 
-クラスは元々 1 種類だが、近接物体に対する重複箱を IoU > 0.5 で抑制 (`src/yolo11.ts:postprocess`)。
+`bowl` と `cup` が同じマグカップに同時発火するような重複を抑える目的で class-agnostic NMS (IoU > 0.5 で抑制) を採用 (`src/yolo11.ts:postprocess`)。
+
+### SCORE_THRESHOLD = 0.15
+
+低めに設定。false positive (誤分類された箱) はユーザーが選ばないだけなので問題にならず、逆に **検出漏れ (= タップできない)** が UX に直結する。`?conf=N` で実行時上書き可能。
 
 ### モデル成果物 (リポジトリ外の export 手順、再生成する場合)
 
 ```python
 from ultralytics import YOLO
-m = YOLO('FastSAM-s.pt')  # 公式重みを自動ダウンロード (~22.7 MB)
+m = YOLO('yolo11n.pt')  # 公式重みを自動ダウンロード (~5.2 MB)
 m.export(format='onnx', imgsz=640, opset=17, dynamic=False, simplify=True)
 
 from onnxruntime.quantization import quantize_dynamic, QuantType
 quantize_dynamic(
-    'FastSAM-s.onnx',
-    'fastsam_s_640_uint8.onnx',
+    'yolo11n.onnx',
+    'yolo11n_coco_640_uint8.onnx',
     weight_type=QuantType.QUInt8,
     per_channel=False,  # per-tensor は onnxruntime-web WASM との相性が良い
 )
 ```
 
-ノートPC で 1 分。GPU 不要、fine-tuning 不要。
+ノートPC で数分、GPU 不要、fine-tuning 不要。
 
 成果物:
-- `public/models/fastsam_s_640_uint8.onnx` — 量子化済みモデル (~11.8 MB)
-- ラベル辞書ファイルは不要 (全 box が "物体" 固定、`src/yolo11.ts:postprocess` でハードコード)
+- `public/models/yolo11n_coco_640_uint8.onnx` — 量子化済みモデル (~2.9 MB)
+- `src/coco-labels.ts` — 80 クラスの日本語ラベル配列 + `labelOf(classId)` ヘルパー
 
 ### 検証要件
 
-- iPhone 14 以降の実機で 5 分連続ライブ実行、タブキル無し (12MB モデルが iOS WebKit のメモリプレッシャー境界に近い)
-- 推論レイテンシ中央値 < 1000ms (1fps 維持)
-- COCO 範囲外の物体 (USB ケーブル、ハサミ、リップ、書類、容器の蓋等) に箱が立つこと
-- LocalTracker の IoU マッチングが class label "物体" 一律でも instance_id を正しく区別できること (同種物体が並んでいても別々に追跡)
-
-### iOS で落ちる場合のフォールバック
-
-1. **入力 512² に再 export** (出力 anchors 5376 に減、活性化半減)
-2. **`SCORE_THRESHOLD` 0.1 → 0.2** に引き上げ (raw candidate 数削減で postprocess 軽量化)
-3. **YOLOv11n-COCO に rollback** (commit 履歴で復旧可)
+- iPhone 14 以降の実機で 5 分連続ライブ実行、タブキル無し
+- 640² で iOS Safari がモデルロードに成功する (出力 ~2.8MB は memory-pressure 上限の十分内)
+- 「ボトル」「コップ」「ノートPC」「スマホ」「リモコン」「本」など COCO 主要クラスで bbox が出ること
+- 細かい物 (リップクリーム、USBケーブル等) は COCO に無いが、近隣の COCO クラスが箱を出してくれれば OK (タップ → Gemini が「リップクリーム」と返してくれる想定)
 
 ### ライセンス注意
 
-FastSAM および Ultralytics YOLO は **AGPL-3.0**。SA-1B 自体は Apache-2.0 + CC-BY-4.0 (研究/商用とも可、再配布可)。社外公開する場合は商用ライセンス、または Apache-2.0 互換の代替 (YOLOE 等) への切替検討が必要。
+Ultralytics YOLO は **AGPL-3.0**。社外公開する場合は商用ライセンス、または Apache-2.0 の代替 (YOLOE-S 等) への切替検討が必要。OIV7 自体のライセンスは Apache-2.0 + CC-BY-4.0 (再配布可)。
