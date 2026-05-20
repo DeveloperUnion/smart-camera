@@ -1,5 +1,4 @@
 import * as ort from 'onnxruntime-web/wasm';
-import { labelOf, COCO_LABELS_JP } from './coco-labels';
 import type { LiveBox } from './types';
 
 // DEIMv2-Pico: a DETR-family detector with the HGNetv2 backbone, trained on
@@ -11,9 +10,14 @@ import type { LiveBox } from './types';
 // still YOLO-style letterbox (114-gray pad + RGB CHW + /255) which DETR
 // also accepts.
 const INPUT_SIZE = 640;
-// COCO_LABELS_JP is used via labelOf(); referenced here for the doc cross-
-// link that this model is 80-class COCO.
-void COCO_LABELS_JP;
+// DEIMv2-Pico is COCO-pretrained so labels[i] is a COCO class id in [0, 80).
+// Empirically at INT8 + 1.5M params the classification head is noisy (e.g.
+// posters get tagged as "toothbrush"). The bbox itself is still well placed,
+// and Gemini does the real identification in /api/refine-items, so we
+// throw the COCO label away and show a generic "物体" on every box. This
+// mirrors what we did with FastSAM and keeps the user from seeing
+// confidently-wrong labels mid-session.
+const GENERIC_LABEL = '物体';
 // DEIMv2's decoder returns a fixed number of object queries (200 per the
 // Pico config). The deploy-mode postprocessor returns the top scoring 300
 // across the batch — already sorted by score descending. We just iterate
@@ -141,7 +145,7 @@ function postprocess(
       bbox: [x1, y1, x2, y2],
       score,
       classId,
-      label: labelOf(classId),
+      label: GENERIC_LABEL,
     });
   }
 

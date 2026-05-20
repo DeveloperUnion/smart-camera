@@ -116,11 +116,17 @@ class-agnostic はアーキテクチャ的に正しいが、SA-1B 訓練のモ�
 
 ### 結果
 
-(実機テスト後に記入)
+- **iOS ロード**: ✅ 成功 (2.3MB は余裕)
+- **bbox 配置**: ◯ 物体に概ね正しく箱が立つ。FastSAM のような乱立はなく、YOLOv11n-COCO 並みのクリーンさ
+- **classification**: ❌ 著しく劣化。例: **ポスターが「歯ブラシ」(COCO class 79) として分類**
+- **原因推定**: 1.5M params + INT8 per-tensor 量子化で分類ヘッドが崩れる。DETR は attention 層が量子化感度高く、Pico 規模では誤分類が出やすい
+- **mitigation**: COCO ラベルを UI に出さず **全 box を `"物体"` 固定表示** に変更 (commit TBD)。box 自体は使えるので Gemini 詳細化に流す前提で UX 損失ゼロ
 
-### 判断
+### 判断: ⚠️ ラベル捨てて採用、ただし classification 改善余地あり
 
-(実機テスト後に記入)
+- box 配置は良好で、UI でラベル隠せば運用可能
+- ただし classification の質を取り戻したいなら **DEIMv2-N (3.6M, AP 43.0)** に格上げが候補
+- 一旦この構成 (Pico + ラベル隠し) でユーザー確認 → ダメなら次の試行へ
 
 ---
 
