@@ -133,9 +133,10 @@ export default function App() {
       }
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      ctx.font =
-        '16px -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic UI", sans-serif';
-
+      // No per-box text overlay — the on-device detector (DEIMv2-Pico) is
+      // small enough that its COCO class predictions aren't trustworthy
+      // (posters get tagged as "toothbrush", etc.). Boxes alone are the
+      // signal; Gemini does the actual identification post-stop.
       const visible = visibleCanvasRegion(canvas);
       for (const b of localBoxesRef.current) {
         const inCart = cartRef.current.has(b.instance_id);
@@ -157,26 +158,6 @@ export default function App() {
         const x2 = Math.max(visible.x1, Math.min(visible.x2, rx2));
         const y2 = Math.max(visible.y1, Math.min(visible.y2, ry2));
         ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
-
-        const padding = 6;
-        const labelHeight = 22;
-        const visibleW = visible.x2 - visible.x1;
-        const textWidth = Math.min(
-          visibleW,
-          ctx.measureText(b.label).width + padding * 2,
-        );
-        const labelX = Math.max(
-          visible.x1,
-          Math.min(x1, visible.x2 - textWidth),
-        );
-        const labelY =
-          y1 - labelHeight >= visible.y1
-            ? y1 - labelHeight
-            : Math.min(y1, visible.y2 - labelHeight);
-        ctx.fillStyle = 'rgba(0,0,0,0.7)';
-        ctx.fillRect(labelX, labelY, textWidth, labelHeight);
-        ctx.fillStyle = '#fff';
-        ctx.fillText(b.label, labelX + padding, labelY + 16);
       }
 
       const now = performance.now();
@@ -418,28 +399,25 @@ export default function App() {
           />
           <div className="badge">🛒 {cartCount}</div>
           <div className="live-cart-panel">
-            {cartGroups.length === 0 ? (
+            {cartCount === 0 ? (
               <div className="live-cart-empty">枠をタップしてカゴに追加</div>
             ) : (
-              cartGroups.map(([label, { ids }]) => (
-                <div className="live-cart-chip" key={label}>
-                  <span className="live-cart-chip-label">{label}</span>
-                  <span className="live-cart-chip-count">×{ids.length}</span>
-                  <button
-                    className="live-cart-chip-remove"
-                    onClick={() =>
-                      setCart((prev) => {
-                        const next = new Map(prev);
-                        for (const id of ids) next.delete(id);
-                        return next;
-                      })
-                    }
-                    aria-label="削除"
-                  >
-                    ×
-                  </button>
-                </div>
-              ))
+              // While live, every cart entry is labeled "物体" since DEIMv2
+              // class predictions are unreliable. Per-label chips would just
+              // be one chip saying "物体 × N", which is no more useful than
+              // the count badge. Show a single "選択中 × N" chip with a
+              // clear-all button instead.
+              <div className="live-cart-chip">
+                <span className="live-cart-chip-label">選択中</span>
+                <span className="live-cart-chip-count">×{cartCount}</span>
+                <button
+                  className="live-cart-chip-remove"
+                  onClick={() => setCart(new Map())}
+                  aria-label="すべて削除"
+                >
+                  ×
+                </button>
+              </div>
             )}
           </div>
           {tooManyVisible && (
