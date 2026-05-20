@@ -20,17 +20,41 @@ const INPUT_SIZE = 640;
 // since there's no per-class argmax anymore.
 const NUM_CLASSES = 1;
 const NUM_ANCHORS = 8400; // 80*80 + 40*40 + 20*20
-// Class-agnostic objectness from a model trained on "anything visible" runs
-// noticeably lower confidence values than COCO YOLO did on its 80 trained
-// classes. Default to a low threshold and lean on NMS + visual decluttering
-// to keep the overlay legible. `?conf=N` overrides at runtime.
-const SCORE_THRESHOLD = (() => {
-  if (typeof window === 'undefined') return 0.1;
-  const p = new URLSearchParams(window.location.search).get('conf');
+// FastSAM is trained on SA-1B which deliberately includes "parts of objects",
+// "regions", and "groups of things" as separate masks, so a raw forward pass
+// produces 100+ candidates per frame and the overlay becomes a mess. The
+// tunables below trim that down to a phone-screen-legible count while
+// keeping high-confidence whole-object boxes.
+//
+// Every knob is URL-overridable so iPhone field-tuning doesn't need a
+// redeploy: ?conf, ?iou, ?minarea, ?maxarea, ?contain, ?maxbox.
+function urlNum(key: string, fallback: number, min = 0, max = 1): number {
+  if (typeof window === 'undefined') return fallback;
+  const p = new URLSearchParams(window.location.search).get(key);
   const n = p ? Number(p) : NaN;
-  return Number.isFinite(n) && n > 0 && n < 1 ? n : 0.1;
-})();
-const NMS_IOU_THRESHOLD = 0.5;
+  return Number.isFinite(n) && n > min && n <= max ? n : fallback;
+}
+
+// Score floor. 0.25 already cuts most of the "regions/parts" noise in
+// SA-1B-trained models while keeping real-object boxes around.
+const SCORE_THRESHOLD = urlNum('conf', 0.25);
+// Stricter NMS than COCO YOLO (0.5) because SA-1B's "object + its parts"
+// supervision means many candidates sit close on the same physical thing.
+// 0.3 collapses these into a single bbox per spatial region.
+const NMS_IOU_THRESHOLD = urlNum('iou', 0.3);
+// Drop tiny boxes (texture noise) and huge boxes (the "whole scene" /
+// background region that SA-1B sometimes labels as one giant mask).
+// Fractions are of the original video frame area, not the 640² letterbox.
+const MIN_AREA_FRAC = urlNum('minarea', 0.005);   // 0.5%
+const MAX_AREA_FRAC = urlNum('maxarea', 0.7, 0, 1);  // 70%
+// Containment filter: drop box B if ≥ CONTAIN_RATIO of B is inside a
+// higher-score box A. Handles "mug handle inside mug" / "screen inside
+// phone" cases that NMS misses because IoU is low (small box inside big
+// box has high IoMin but low IoU).
+const CONTAIN_RATIO = urlNum('contain', 0.8);
+// Hard cap on the number of boxes shown per frame. Past ~15-20 the user
+// can't reasonably tap anything anyway.
+const MAX_BOXES_PER_FRAME = Math.round(urlNum('maxbox', 15, 0, 200));
 
 // FastSAM output shape is `[1, 4+1+32, 8400]` (4 box + 1 objectness + 32 mask
 // coefficients). We don't render masks so we slice off the coefficients and
@@ -151,6 +175,9 @@ function postprocess(output: Float32Array, meta: LetterboxMeta): LiveBox[] {
   const candidates: Candidate[] = [];
   const stride = NUM_ANCHORS;
   let frameMaxScore = 0;
+  const frameArea = meta.vw * meta.vh;
+  const minBoxArea = frameArea * MIN_AREA_FRAC;
+  const maxBoxArea = frameArea * MAX_AREA_FRAC;
 
   // Channel 4 = objectness. No per-class argmax loop anymore — class-agnostic
   // detection collapses what used to be ~600 channel reads per anchor down
@@ -171,18 +198,18 @@ function postprocess(output: Float32Array, meta: LetterboxMeta): LiveBox[] {
     const lx2 = cx + w / 2;
     const ly2 = cy + h / 2;
 
-    const x1 = (lx1 - meta.padX) / meta.scale;
-    const y1 = (ly1 - meta.padY) / meta.scale;
-    const x2 = (lx2 - meta.padX) / meta.scale;
-    const y2 = (ly2 - meta.padY) / meta.scale;
+    const x1 = Math.max(0, Math.min(meta.vw, (lx1 - meta.padX) / meta.scale));
+    const y1 = Math.max(0, Math.min(meta.vh, (ly1 - meta.padY) / meta.scale));
+    const x2 = Math.max(0, Math.min(meta.vw, (lx2 - meta.padX) / meta.scale));
+    const y2 = Math.max(0, Math.min(meta.vh, (ly2 - meta.padY) / meta.scale));
 
-    candidates.push({
-      x1: Math.max(0, Math.min(meta.vw, x1)),
-      y1: Math.max(0, Math.min(meta.vh, y1)),
-      x2: Math.max(0, Math.min(meta.vw, x2)),
-      y2: Math.max(0, Math.min(meta.vh, y2)),
-      score,
-    });
+    // Area filter — drop noise (texture / sub-pixel detections) and whole-
+    // scene "background region" detections before they enter NMS, since
+    // those are usually high-score and would dominate the kept list.
+    const area = (x2 - x1) * (y2 - y1);
+    if (area < minBoxArea || area > maxBoxArea) continue;
+
+    candidates.push({ x1, y1, x2, y2, score });
   }
 
   candidates.sort((a, b) => b.score - a.score);
@@ -199,13 +226,40 @@ function postprocess(output: Float32Array, meta: LetterboxMeta): LiveBox[] {
     }
   }
 
+  // Containment filter — drop boxes that are mostly inside a higher-score
+  // kept box. SA-1B intentionally labels both "the mug" and "the handle of
+  // the mug" as objects; NMS keeps both because IoU(small, large) is low,
+  // but for tap-to-select we want one box per physical thing. `kept` is
+  // already sorted by score (descending), so for each box we only need to
+  // check against the boxes that came before it.
+  const final: Candidate[] = [];
+  for (let i = 0; i < kept.length; i++) {
+    const b = kept[i];
+    const bArea = (b.x2 - b.x1) * (b.y2 - b.y1);
+    let contained = false;
+    for (let j = 0; j < final.length; j++) {
+      const a = final[j];
+      const xi1 = Math.max(a.x1, b.x1);
+      const yi1 = Math.max(a.y1, b.y1);
+      const xi2 = Math.min(a.x2, b.x2);
+      const yi2 = Math.min(a.y2, b.y2);
+      const inter = Math.max(0, xi2 - xi1) * Math.max(0, yi2 - yi1);
+      if (inter / bArea >= CONTAIN_RATIO) {
+        contained = true;
+        break;
+      }
+    }
+    if (!contained) final.push(b);
+    if (final.length >= MAX_BOXES_PER_FRAME) break;
+  }
+
   lastMaxScore = frameMaxScore;
   lastRawCount = candidates.length;
-  lastKeptCount = kept.length;
+  lastKeptCount = final.length;
 
   // All boxes share a generic label — the model is class-agnostic and the
   // actual identification happens later in /api/refine-items.
-  return kept.map((c) => ({
+  return final.map((c) => ({
     bbox: [c.x1, c.y1, c.x2, c.y2],
     score: c.score,
     classId: 0,
