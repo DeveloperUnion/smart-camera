@@ -2,48 +2,48 @@ import * as ort from 'onnxruntime-web/wasm';
 import { labelOf, COCO_LABELS_JP } from './coco-labels';
 import type { LiveBox } from './types';
 
-// 640² with COCO-80: output [1, 84, 8400] ≈ 2.8MB FP32 — comfortably under
-// the iOS WebKit memory-pressure threshold. We tried OIV7 (601 classes) at
-// 512² earlier; recall was poor because per-class supervision was spread
-// thin and the larger output tensor forced us down to 512². With COCO the
-// math reverses: smaller class head + denser per-class training + room to
-// run at 640².
+// DEIMv2-Pico: a DETR-family detector with the HGNetv2 backbone, trained on
+// COCO. 1.5M params, ~2.3MB INT8, Apache 2.0 licensed. End-to-end ONNX —
+// the postprocessor is baked into the graph so we get labels/boxes/scores
+// directly, no per-anchor decoding or NMS on the JS side.
+//
+// File name `yolo11.ts` is kept for git/history continuity. Preprocess is
+// still YOLO-style letterbox (114-gray pad + RGB CHW + /255) which DETR
+// also accepts.
 const INPUT_SIZE = 640;
-const NUM_CLASSES = COCO_LABELS_JP.length; // 80
-const NUM_ANCHORS = 8400; // 80*80 + 40*40 + 20*20
-// Bias for recall: the user picks bboxes by tapping, and /api/refine-items
-// asks Gemini to identify what was actually selected, so coarse/wrong YOLO
-// labels are fine — but missing bboxes is fatal. Default 0.15 with `?conf=N`
-// override for tuning.
+// COCO_LABELS_JP is used via labelOf(); referenced here for the doc cross-
+// link that this model is 80-class COCO.
+void COCO_LABELS_JP;
+// DEIMv2's decoder returns a fixed number of object queries (200 per the
+// Pico config). The deploy-mode postprocessor returns the top scoring 300
+// across the batch — already sorted by score descending. We just iterate
+// until scores drop below threshold.
+const MAX_QUERIES = 300;
+// Bias for recall: false positives are silently ignored (user just doesn't
+// tap), but missed objects can't be selected. `?conf=N` overrides.
 const SCORE_THRESHOLD = (() => {
-  if (typeof window === 'undefined') return 0.15;
+  if (typeof window === 'undefined') return 0.25;
   const p = new URLSearchParams(window.location.search).get('conf');
   const n = p ? Number(p) : NaN;
-  return Number.isFinite(n) && n > 0 && n < 1 ? n : 0.15;
+  return Number.isFinite(n) && n > 0 && n < 1 ? n : 0.25;
 })();
-const NMS_IOU_THRESHOLD = 0.5;
 
 let session: ort.InferenceSession | null = null;
 let activeBackend: 'wasm' | null = null;
 
-// Reused per-call buffers — allocated once at module init.
 const inputBuffer = new Float32Array(3 * INPUT_SIZE * INPUT_SIZE);
+// orig_target_sizes is a fixed [[640, 640]] for our use — we letterbox the
+// video frame into 640² and ask the postprocessor to scale boxes back to
+// 640² space, then we un-letterbox to video pixels ourselves.
+const origSizes = new BigInt64Array([BigInt(INPUT_SIZE), BigInt(INPUT_SIZE)]);
 
-// Use the wasm-only build (no WebGPU asyncify). The bundled webgpu variant is
-// ~23MB and pushes iPhone WebKit over its memory-pressure tab-kill threshold
-// during model load. The wasm-only artifacts are ~10MB or less.
 ort.env.wasm.wasmPaths =
   'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.3/dist/';
-// Pin to a single thread — iPhone WebKit cannot use SharedArrayBuffer without
-// COOP/COEP anyway, and the multi-thread loader path adds extra worker heaps
-// that contribute to the memory-pressure kill.
 ort.env.wasm.numThreads = 1;
 
 export async function loadModel(): Promise<{ backend: 'wasm' }> {
   if (session && activeBackend) return { backend: activeBackend };
-
-  const modelUrl = '/models/yolo11n_coco_640_uint8.onnx';
-
+  const modelUrl = '/models/deimv2_pico_640_uint8.onnx';
   session = await ort.InferenceSession.create(modelUrl, {
     executionProviders: ['wasm'],
     graphOptimizationLevel: 'all',
@@ -62,8 +62,6 @@ type LetterboxMeta = {
 
 let scratchCtx: CanvasRenderingContext2D | null = null;
 
-// YOLO11 expects letterbox-resized 640x640 with 114 gray padding,
-// values normalized to [0, 1], RGB channels-first.
 function preprocess(
   video: HTMLVideoElement,
   scratch: HTMLCanvasElement,
@@ -84,7 +82,6 @@ function preprocess(
   const padX = (INPUT_SIZE - dw) / 2;
   const padY = (INPUT_SIZE - dh) / 2;
 
-  // Fill with YOLO's gray padding color so border anchors don't fire.
   ctx.fillStyle = 'rgb(114, 114, 114)';
   ctx.fillRect(0, 0, INPUT_SIZE, INPUT_SIZE);
   ctx.drawImage(video, padX, padY, dw, dh);
@@ -100,110 +97,57 @@ function preprocess(
   return { vw, vh, scale, padX, padY };
 }
 
-type Candidate = {
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
-  score: number;
-  classId: number;
-};
-
-function iou(a: Candidate, b: Candidate): number {
-  const xi1 = Math.max(a.x1, b.x1);
-  const yi1 = Math.max(a.y1, b.y1);
-  const xi2 = Math.min(a.x2, b.x2);
-  const yi2 = Math.min(a.y2, b.y2);
-  const inter = Math.max(0, xi2 - xi1) * Math.max(0, yi2 - yi1);
-  if (inter <= 0) return 0;
-  const aArea = (a.x2 - a.x1) * (a.y2 - a.y1);
-  const bArea = (b.x2 - b.x1) * (b.y2 - b.y1);
-  return inter / (aArea + bArea - inter);
-}
-
 // Diagnostic counters from the last postprocess pass — exposed to the
-// debug overlay so we can tell "model produced nothing" from "threshold
-// rejected everything" when triaging recall issues.
+// debug overlay.
 export let lastMaxScore = 0;
 export let lastRawCount = 0;
 export let lastKeptCount = 0;
 
-// Output shape [1, 4+NUM_CLASSES, NUM_ANCHORS]: 4 box (cx,cy,w,h in input
-// pixel space) + per-class scores per anchor. Class scores are already
-// sigmoid'd by the Ultralytics ONNX export.
-function postprocess(output: Float32Array, meta: LetterboxMeta): LiveBox[] {
-  const candidates: Candidate[] = [];
-  const stride = NUM_ANCHORS;
-  let frameMaxScore = 0;
+// DEIMv2 deploy-mode outputs are already postprocessed: scores sorted
+// descending across the batch's queries, boxes in input-image pixel space
+// (xyxy), labels as integer class IDs. We just threshold and un-letterbox.
+function postprocess(
+  labels: BigInt64Array | Int32Array,
+  boxes: Float32Array,
+  scores: Float32Array,
+  meta: LetterboxMeta,
+): LiveBox[] {
+  const out: LiveBox[] = [];
+  const n = Math.min(scores.length, MAX_QUERIES);
+  lastMaxScore = n > 0 ? scores[0] : 0;
+  let raw = 0;
 
-  for (let i = 0; i < NUM_ANCHORS; i++) {
-    let bestClass = 0;
-    let bestScore = output[4 * stride + i];
-    for (let c = 1; c < NUM_CLASSES; c++) {
-      const v = output[(4 + c) * stride + i];
-      if (v > bestScore) {
-        bestScore = v;
-        bestClass = c;
-      }
-    }
-    if (bestScore > frameMaxScore) frameMaxScore = bestScore;
-    if (bestScore < SCORE_THRESHOLD) continue;
+  for (let i = 0; i < n; i++) {
+    const score = scores[i];
+    if (score >= SCORE_THRESHOLD) raw++;
+    // Scores are descending — bail as soon as we drop below threshold.
+    if (score < SCORE_THRESHOLD) break;
 
-    const cx = output[i];
-    const cy = output[stride + i];
-    const w = output[2 * stride + i];
-    const h = output[3 * stride + i];
+    const lx1 = boxes[i * 4 + 0];
+    const ly1 = boxes[i * 4 + 1];
+    const lx2 = boxes[i * 4 + 2];
+    const ly2 = boxes[i * 4 + 3];
 
-    // Decode in 640x640 space, then undo letterbox to map back to video pixels.
-    const lx1 = cx - w / 2;
-    const ly1 = cy - h / 2;
-    const lx2 = cx + w / 2;
-    const ly2 = cy + h / 2;
+    // Un-letterbox: boxes come back in the 640² input frame; map back to
+    // the original video pixel space.
+    const x1 = Math.max(0, Math.min(meta.vw, (lx1 - meta.padX) / meta.scale));
+    const y1 = Math.max(0, Math.min(meta.vh, (ly1 - meta.padY) / meta.scale));
+    const x2 = Math.max(0, Math.min(meta.vw, (lx2 - meta.padX) / meta.scale));
+    const y2 = Math.max(0, Math.min(meta.vh, (ly2 - meta.padY) / meta.scale));
+    if (x2 <= x1 || y2 <= y1) continue;
 
-    const x1 = (lx1 - meta.padX) / meta.scale;
-    const y1 = (ly1 - meta.padY) / meta.scale;
-    const x2 = (lx2 - meta.padX) / meta.scale;
-    const y2 = (ly2 - meta.padY) / meta.scale;
-
-    candidates.push({
-      x1: Math.max(0, Math.min(meta.vw, x1)),
-      y1: Math.max(0, Math.min(meta.vh, y1)),
-      x2: Math.max(0, Math.min(meta.vw, x2)),
-      y2: Math.max(0, Math.min(meta.vh, y2)),
-      score: bestScore,
-      classId: bestClass,
+    const classId = Number(labels[i]);
+    out.push({
+      bbox: [x1, y1, x2, y2],
+      score,
+      classId,
+      label: labelOf(classId),
     });
   }
 
-  // Class-agnostic NMS — kept from the OIV7 era. COCO classes don't have
-  // the hierarchical-overlap problem (no Bus⊂Land vehicle⊂Vehicle stack),
-  // but class-agnostic still helps with two adjacent boxes that the model
-  // labels differently (e.g. "bowl" vs "cup" on the same mug) — we only
-  // want one box per physical thing.
-  candidates.sort((a, b) => b.score - a.score);
-  const kept: Candidate[] = [];
-  const suppressed = new Uint8Array(candidates.length);
-  for (let i = 0; i < candidates.length; i++) {
-    if (suppressed[i]) continue;
-    kept.push(candidates[i]);
-    for (let j = i + 1; j < candidates.length; j++) {
-      if (suppressed[j]) continue;
-      if (iou(candidates[i], candidates[j]) > NMS_IOU_THRESHOLD) {
-        suppressed[j] = 1;
-      }
-    }
-  }
-
-  lastMaxScore = frameMaxScore;
-  lastRawCount = candidates.length;
-  lastKeptCount = kept.length;
-
-  return kept.map((c) => ({
-    bbox: [c.x1, c.y1, c.x2, c.y2],
-    score: c.score,
-    classId: c.classId,
-    label: labelOf(c.classId),
-  }));
+  lastRawCount = raw;
+  lastKeptCount = out.length;
+  return out;
 }
 
 export async function detect(
@@ -214,21 +158,27 @@ export async function detect(
   if (!video.videoWidth) return [];
 
   const meta = preprocess(video, scratch);
-  const tensor = new ort.Tensor('float32', inputBuffer, [
+  const images = new ort.Tensor('float32', inputBuffer, [
     1,
     3,
     INPUT_SIZE,
     INPUT_SIZE,
   ]);
-  const inputName = session.inputNames[0];
+  const origSizesTensor = new ort.Tensor('int64', origSizes, [1, 2]);
 
   let results: ort.InferenceSession.OnnxValueMapType | null = null;
   try {
-    results = await session.run({ [inputName]: tensor });
-    const output = results[session.outputNames[0]].data as Float32Array;
-    return postprocess(output, meta);
+    results = await session.run({
+      images,
+      orig_target_sizes: origSizesTensor,
+    });
+    const labels = results['labels'].data as BigInt64Array | Int32Array;
+    const boxes = results['boxes'].data as Float32Array;
+    const scores = results['scores'].data as Float32Array;
+    return postprocess(labels, boxes, scores, meta);
   } finally {
-    tensor.dispose();
+    images.dispose();
+    origSizesTensor.dispose();
     if (results) {
       for (const name of session.outputNames) {
         const t = results[name];
