@@ -128,6 +128,42 @@ class-agnostic はアーキテクチャ的に正しいが、SA-1B 訓練のモ�
 - ただし classification の質を取り戻したいなら **DEIMv2-N (3.6M, AP 43.0)** に格上げが候補
 - 一旦この構成 (Pico + ラベル隠し) でユーザー確認 → ダメなら次の試行へ
 
+**追記 (2026-05-21)**: ユーザー要望で box 上のテキストラベルを完全に非表示化、live mode のカート chip も「選択中 ×N」に集約 (commit `19f9c39`)。
+
+---
+
+## 試行 #5 — DEIMv2-N @ 640²
+
+- **期間**: 2026-05-21 〜
+- **commit**: TBD (このコミット)
+- **モデル**: DEIMv2-N (Intellindust AI Lab、CVPR 2025、Apache 2.0)
+- **構成**:
+  - backbone: HGNetv2-N
+  - 入力 640²、INT8 動的量子化 per-tensor、**~4.4MB** (実測)
+  - Pico と違って `share_bbox_head=False` + `gateway=True` で各層独立 = 表現力↑
+  - I/O は Pico と同一: `images` + `orig_target_sizes` 入、`labels/boxes/scores` 出
+  - SCORE_THRESHOLD = 0.25 維持
+- **狙い**: Pico (AP 38.5) で box の質が惜しいときの格上げ。N は **AP 43.0** で +4.5、param 数 1.5M → 3.6M、INT8 サイズ 2.3MB → 4.4MB
+- **コード変更**: 推論コード無変更、`modelUrl` の 1 文字差し替えのみ
+
+### Export 経緯
+
+Pico と同パイプライン:
+1. HF `Intellindust/DEIMv2_HGNetv2_N_COCO` から safetensors (14MB) 取得
+2. state_dict 化 → `tools/deployment/export_onnx.py` の strict=False パッチ版に投入
+   - N は `share_bbox_head=False` なので tied weights 問題は無し、念のため strict=False で
+3. FP32 ONNX 14.8MB → INT8 per-tensor 量子化 → **4.4MB**
+
+開発機 (M4 Mac CPU) でランダム入力推論 ~27ms (Pico 22ms より 23% 遅い)。iOS WASM 単スレで 150-300ms / フレーム = 3-7fps 見込み。
+
+### 結果
+
+(実機テスト後に記入)
+
+### 判断
+
+(実機テスト後に記入)
+
 ---
 
 ## 候補リスト (試行待ち)

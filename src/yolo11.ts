@@ -1,10 +1,16 @@
 import * as ort from 'onnxruntime-web/wasm';
 import type { LiveBox } from './types';
 
-// DEIMv2-Pico: a DETR-family detector with the HGNetv2 backbone, trained on
-// COCO. 1.5M params, ~2.3MB INT8, Apache 2.0 licensed. End-to-end ONNX —
+// DEIMv2-N: a DETR-family detector with the HGNetv2 backbone, trained on
+// COCO. 3.6M params, ~4.4MB INT8, Apache 2.0 licensed. End-to-end ONNX —
 // the postprocessor is baked into the graph so we get labels/boxes/scores
 // directly, no per-anchor decoding or NMS on the JS side.
+//
+// Upgraded from DEIMv2-Pico (1.5M, AP 38.5) for better localization. N is
+// 43.0 AP — the +4.5 AP closes most of the gap to S (50.9 AP) at less than
+// half the parameter count. Classification head is still treated as
+// unreliable (labels are clobbered to "物体" / hidden); the upgrade is
+// purely for cleaner bboxes.
 //
 // File name `yolo11.ts` is kept for git/history continuity. Preprocess is
 // still YOLO-style letterbox (114-gray pad + RGB CHW + /255) which DETR
@@ -47,7 +53,7 @@ ort.env.wasm.numThreads = 1;
 
 export async function loadModel(): Promise<{ backend: 'wasm' }> {
   if (session && activeBackend) return { backend: activeBackend };
-  const modelUrl = '/models/deimv2_pico_640_uint8.onnx';
+  const modelUrl = '/models/deimv2_n_640_uint8.onnx';
   session = await ort.InferenceSession.create(modelUrl, {
     executionProviders: ['wasm'],
     graphOptimizationLevel: 'all',
