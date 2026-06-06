@@ -174,13 +174,57 @@ box 品質を理由にした格上げ目的は達成。これ以上 (DEIMv2-S = 
 
 ---
 
+## 試行 #6 — DEIMv2-S @ 640² (iOS メモリ上限の実機プローブ)
+
+- **期間**: 2026-06-06 〜
+- **commit**: TBD (このコミット、trial ブランチ)
+- **モデル**: DEIMv2-S (Intellindust AI Lab、CVPR 2025、Apache 2.0)
+- **構成**:
+  - backbone: **DINOv3 ViT-Tiny (蒸留)** ← N までの HGNetv2 (CNN) と違い ViT 系
+  - 入力 640²、INT8 動的量子化 per-tensor (QUInt8)、**~11.8MB** (実測)
+  - I/O は N と同一: `images` + `orig_target_sizes` 入、`labels`/`boxes`/`scores` 出
+  - SCORE_THRESHOLD = 0.25 維持、前処理も `/255` letterbox のまま (変更なし)
+- **狙い**: 「~10MB 級の S 帯モデルが iOS Safari WASM で memory-pressure 死せず動くか」の**上限実測**が主目的。あわせて box 品質を N (AP 43.0) → S (AP 50.9) に格上げできるか確認。語彙は COCO-80 のまま。
+
+### Export 経緯 (N と同パイプライン)
+
+1. HF `Intellindust/DEIMv2_DINOv3_S_COCO` から `model.safetensors` (39.4MB / FP32) 取得
+2. safetensors → `cfg.model.load_state_dict(state, strict=False)` で投入
+   - missing 2 個 (`decoder.up`, `decoder.reg_scale`) のみ。これは `__init__` で default 値 (0.5, 4.0) が入る `nn.Parameter` なので問題なし (N と同じ挙動)
+   - DINOv3 backbone の `weights_path: ./ckpts/vitt_distill.pt` はファイル不在で skip される (full ckpt を後段で load 済なので不要)
+3. 公式 `export_onnx.py` 同等の deploy wrapper (model.deploy() + postprocessor.deploy()) で opset 17 export → FP32 ONNX **40.1MB**
+4. `onnxruntime.quantization.quantize_dynamic` UInt8 per-tensor → **11.78MB**
+
+### 量子化検証 (onnxruntime CPU, example.jpg)
+
+FP32 と INT8、`/255only` と `mean/std` 正規化の 4 通りを比較:
+
+- **INT8 は FP32 とほぼ同一の検出** (box 1-2px 差、max score 0.78→0.86)。**ViT backbone の量子化破壊なし**。
+- **`/255only` (本番前処理) でも S は健全に動作**。mean/std 正規化との差は box 1px・検出数 30 vs 29 でほぼ同等 (正規化無しだとスコアが僅かに低いが threshold 0.25 で全部拾える)。
+  → **yolo11.ts の前処理は変更不要**、純粋な modelUrl 差し替えで載る。
+
+### 切替方法
+
+`?model=s` で S を、無指定/`?model=n` で従来 N をロード (`src/yolo11.ts` の `pickModelUrl`)。**同一 iOS 端末で N/S を A/B 比較**してから採否を決める。
+
+### 結果 (iOS 実機)
+
+- TBD: ロード可否 (~11.8MB で memory-pressure 死しないか)
+- TBD: 連続推論でのクラッシュ有無 (YOLO26 系の ~500 推論クラッシュ類似がないか数分回す)
+- TBD: fps (N 比でどれだけ落ちるか)
+- TBD: box 品質が N より体感で良くなるか
+
+### 判断: ⚠️ 実機テスト中
+
+---
+
 ## 候補リスト (試行待ち)
 
 優先度順:
 
 1. **DEIMv2-Pico** ← 試行 #4 で実施中
 2. **YOLO26-N** (Ultralytics 2025/10) — 既存 YOLOv11n の素直な後継、CPU 43% 速い、NMS-free、AGPL-3.0
-3. **DEIMv2-S** (9.71M / ~10MB) — Pico でリコール不足なら精度上げ
+3. ~~**DEIMv2-S** (9.71M / ~10MB)~~ ← 試行 #6 で実施中 (実測 INT8 11.8MB)
 4. **YOLOv10n** (2024) — Apache 2.0、NMS-free、ライセンス避難先
 5. **DEIMv2-Atto** (0.49M / ~1MB) — Pico で速度足りなければ降格
 
