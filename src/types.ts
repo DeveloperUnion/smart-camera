@@ -30,3 +30,28 @@ export type RefinedItem = {
   yearOfManufacture?: string;
   capacity?: string;
 };
+
+// One selected object in the cart, keyed by LocalTracker instance_id so tapping
+// the same physical object twice is deduped while distinct instances of the
+// same label aggregate as a count after refining.
+//
+// `source` records how it entered the cart: 'tap' (the existing live tap flow)
+// or 'voice' (the upcoming Gemini Live talk mode). `note`/`position` are
+// optional free-text annotations the voice mode can attach. `snapshot_b64` is
+// optional because the voice path may add an item without a captured frame; the
+// tap path always provides one (then clears it after refine-items returns).
+export type CartEntry = {
+  instance_id: number;
+  // YOLO's coarse label; always present so the cart can show something
+  // immediately on tap, and so refine-items has a hint to send to Gemini.
+  yolo_label: string;
+  // Base64 JPEG (no data: prefix). Cleared after refine-items returns to free
+  // memory. May be absent entirely on the voice path.
+  snapshot_b64?: string;
+  // Normalized 0-1 xyxy in the captured frame's coordinate space.
+  snapshot_bbox: [number, number, number, number];
+  refined?: RefinedItem;
+  source: 'tap' | 'voice';
+  note?: string;
+  position?: string;
+};
