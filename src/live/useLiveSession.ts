@@ -160,9 +160,10 @@ export function useLiveSession({
         const body = await res.json().catch(() => ({}));
         throw new Error(body?.error || `トークン取得失敗 (HTTP ${res.status})`);
       }
-      const { token, model } = (await res.json()) as {
+      const { token, model, fallbackModel } = (await res.json()) as {
         token: string;
         model: string;
+        fallbackModel?: string;
       };
 
       // Ephemeral tokens are a v1alpha feature; the token is used as the apiKey.
@@ -171,28 +172,43 @@ export function useLiveSession({
         httpOptions: { apiVersion: 'v1alpha' },
       });
 
-      const session = await ai.live.connect({
-        model,
-        callbacks: {
-          onopen: () => setStatus('active'),
-          onmessage: handleMessage,
-          onerror: (e: ErrorEvent) => {
-            setError(e.message || 'Live セッションエラー');
-            setStatus('error');
-            teardown();
+      const connectWith = (modelName: string) =>
+        ai.live.connect({
+          model: modelName,
+          callbacks: {
+            onopen: () => setStatus('active'),
+            onmessage: handleMessage,
+            onerror: (e: ErrorEvent) => {
+              setError(e.message || 'Live セッションエラー');
+              setStatus('error');
+              teardown();
+            },
+            onclose: () => {
+              // Only reflect a clean close if we didn't already error out.
+              setStatus((s) => (s === 'error' ? s : 'idle'));
+            },
           },
-          onclose: () => {
-            // Only reflect a clean close if we didn't already error out.
-            setStatus((s) => (s === 'error' ? s : 'idle'));
+          config: {
+            responseModalities: [Modality.AUDIO],
+            systemInstruction,
+            tools: [{ functionDeclarations: tools }],
+            outputAudioTranscription: {},
           },
-        },
-        config: {
-          responseModalities: [Modality.AUDIO],
-          systemInstruction,
-          tools: [{ functionDeclarations: tools }],
-          outputAudioTranscription: {},
-        },
-      });
+        });
+
+      // Try the primary model; on connect failure fall back once (the token is
+      // minted with uses: 2 to allow this retry).
+      let session: Session;
+      try {
+        session = await connectWith(model);
+      } catch (primaryErr) {
+        if (!fallbackModel || fallbackModel === model) throw primaryErr;
+        console.warn(
+          `live: primary model "${model}" failed, falling back to "${fallbackModel}"`,
+          primaryErr,
+        );
+        session = await connectWith(fallbackModel);
+      }
       sessionRef.current = session;
 
       // Mic → 16 kHz PCM → realtime input. Report the actual context rate.

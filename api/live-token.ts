@@ -15,10 +15,13 @@ const ai = apiKey
   ? new GoogleGenAI({ apiKey, httpOptions: { apiVersion: 'v1alpha' } })
   : null;
 
-// Native-audio Live model. Override via env to try the fallback candidate
-// (gemini-3.1-flash-live-preview) without a redeploy.
+// Primary/fallback Live models, mirroring the refine-items endpoint. The
+// client tries the primary first and falls back on connect failure. Override
+// either via env without a redeploy.
 const LIVE_MODEL =
-  process.env.GEMINI_LIVE_MODEL ||
+  process.env.GEMINI_LIVE_MODEL || 'gemini-3.1-flash-live-preview';
+const LIVE_FALLBACK_MODEL =
+  process.env.GEMINI_LIVE_FALLBACK_MODEL ||
   'gemini-2.5-flash-native-audio-preview-12-2025';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -33,18 +36,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   // expireTime: hard ceiling on how long sessions started with this token may
   // run (30 min). newSessionExpireTime: the token must be used to OPEN a
-  // session within this window (1 min) — it is single-use (uses: 1) and meant
-  // to be handed straight to the client to connect immediately.
+  // session within this window (1 min) and handed straight to the client.
+  // uses: 2 so the client can retry once with the fallback model on the same
+  // token if the primary connect fails. The model is intentionally left
+  // unlocked (only responseModalities is constrained) so one token works for
+  // either model.
   const now = Date.now();
   const expireTime = new Date(now + 30 * 60 * 1000).toISOString();
   const newSessionExpireTime = new Date(now + 60 * 1000).toISOString();
 
   const tokenConfig: CreateAuthTokenConfig = {
-    uses: 1,
+    uses: 2,
     expireTime,
     newSessionExpireTime,
     liveConnectConstraints: {
-      model: LIVE_MODEL,
       config: {
         responseModalities: [Modality.AUDIO],
       },
@@ -57,7 +62,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       res.status(502).json({ error: 'token creation returned no name' });
       return;
     }
-    res.status(200).json({ token: token.name, model: LIVE_MODEL, expireTime });
+    res.status(200).json({
+      token: token.name,
+      model: LIVE_MODEL,
+      fallbackModel: LIVE_FALLBACK_MODEL,
+      expireTime,
+    });
   } catch (e) {
     console.error('live-token error', e);
     const msg = e instanceof Error ? e.message : 'token creation failed';
