@@ -3,11 +3,7 @@ import { useCamera } from './useCamera';
 import { Button } from './ui/Button';
 import { CartView } from './cart/CartView';
 import { useLiveSession } from './live/useLiveSession';
-import {
-  cartToolDeclarations,
-  createCartHandlers,
-  TALK_SYSTEM_INSTRUCTION,
-} from './live/cartTools';
+import { createCartHandlers } from './live/cartTools';
 import type { CartEntry, RefinedItem } from './types';
 import './App.css';
 
@@ -48,9 +44,7 @@ export default function App() {
   });
   const talk = useLiveSession({
     videoEl: camera.videoEl,
-    tools: cartToolDeclarations,
     handlers: cartHandlers,
-    systemInstruction: TALK_SYSTEM_INSTRUCTION,
   });
   const talkActive = talk.status === 'active' || talk.status === 'connecting';
   const toggleTalk = useCallback(() => {

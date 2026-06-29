@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { GoogleGenAI, Modality } from '@google/genai';
+import { GoogleGenAI } from '@google/genai';
 import type {
-  FunctionDeclaration,
   FunctionResponse,
   LiveServerMessage,
   Session,
@@ -25,9 +24,10 @@ type Options = {
   // Read each second to push a frame as visual context. May be null while the
   // camera is starting; frames are simply skipped until it's ready.
   videoEl: HTMLVideoElement | null;
-  tools: FunctionDeclaration[];
+  // Tool-call handlers, keyed by tool name. The tool DECLARATIONS, prompt and
+  // temperature are baked into the ephemeral token server-side (see
+  // talkConfig.ts) — the client only executes the calls.
   handlers: Record<string, ToolHandler>;
-  systemInstruction: string;
   // 0 disables video; otherwise the JPEG send interval in ms (1000 = 1fps).
   frameIntervalMs?: number;
 };
@@ -48,9 +48,7 @@ export type LiveSession = {
 // — only start()/stop() and unmount do.
 export function useLiveSession({
   videoEl,
-  tools,
   handlers,
-  systemInstruction,
   frameIntervalMs = 1000,
 }: Options): LiveSession {
   const [status, setStatus] = useState<LiveStatus>('idle');
@@ -212,6 +210,9 @@ export function useLiveSession({
             apiKey: attempt.token,
             httpOptions: { apiVersion: 'v1alpha' },
           });
+          // No `config` here on purpose: with an ephemeral token the session
+          // config (modalities, prompt, tools, temperature) is whatever was
+          // locked into the token at mint time; client config is ignored.
           ai.live
             .connect({
               model: attempt.model,
@@ -241,15 +242,6 @@ export function useLiveSession({
                   setStatus('error');
                   teardown();
                 },
-              },
-              config: {
-                responseModalities: [Modality.AUDIO],
-                systemInstruction,
-                tools: [{ functionDeclarations: tools }],
-                outputAudioTranscription: {},
-                // Low temperature so the model follows the "add to cart, don't
-                // lecture" instruction instead of drifting into conversation.
-                temperature: 0.2,
               },
             })
             .then((s) => {
@@ -310,7 +302,7 @@ export function useLiveSession({
       setStatus('error');
       teardown();
     }
-  }, [handleMessage, systemInstruction, tools, frameIntervalMs, teardown]);
+  }, [handleMessage, frameIntervalMs, teardown]);
 
   // Tear everything down on unmount.
   useEffect(() => teardown, [teardown]);
