@@ -11,6 +11,9 @@ import { captureFrameJpeg } from '../captureSnapshot';
 
 export type LiveStatus = 'idle' | 'connecting' | 'active' | 'error';
 
+// One (ephemeral token, locked model) pair from /api/live-token, tried in order.
+type Attempt = { token: string; model: string };
+
 // A tool the model can call to operate the cart by voice. The returned object
 // is sent straight back as the function response so the model can confirm what
 // happened verbally ("ペットボトルを1つ追加しました").
@@ -165,67 +168,112 @@ export function useLiveSession({
         const body = await res.json().catch(() => ({}));
         throw new Error(body?.error || `トークン取得失敗 (HTTP ${res.status})`);
       }
-      const { token, model, fallbackModel } = (await res.json()) as {
-        token: string;
-        model: string;
-        fallbackModel?: string;
+      const { primary, fallback } = (await res.json()) as {
+        primary: Attempt;
+        fallback: Attempt | null;
+        expireTime?: string;
       };
+      const attempts = [primary, fallback].filter(
+        (a): a is Attempt => !!a && !!a.token && !!a.model,
+      );
+      if (attempts.length === 0) throw new Error('トークンが空です');
 
-      // Ephemeral tokens are a v1alpha feature; the token is used as the apiKey.
-      const ai = new GoogleGenAI({
-        apiKey: token,
-        httpOptions: { apiVersion: 'v1alpha' },
-      });
+      // Connect with one (token, model) attempt. Each token is locked to its
+      // model, so a fresh client is needed per attempt. Crucially, the attempt
+      // is only considered successful once the FIRST server message arrives
+      // (setupComplete) — a bad/unavailable model opens the socket and then
+      // closes it, so resolving on open alone would mask the failure and skip
+      // the fallback. We resolve on first message, reject on early close/error,
+      // and time out if the server goes silent.
+      const connectAttempt = (attempt: Attempt) =>
+        new Promise<Session>((resolve, reject) => {
+          let settled = false;
+          let sess: Session | null = null;
+          let sawMessage = false;
+          const ok = () => {
+            if (!settled && sess && sawMessage) {
+              settled = true;
+              window.clearTimeout(timer);
+              resolve(sess);
+            }
+          };
+          const fail = (err: Error) => {
+            if (settled) return;
+            settled = true;
+            window.clearTimeout(timer);
+            reject(err);
+          };
+          const timer = window.setTimeout(
+            () => fail(new Error('接続タイムアウト')),
+            10000,
+          );
 
-      const connectWith = (modelName: string) =>
-        ai.live.connect({
-          model: modelName,
-          callbacks: {
-            onopen: () => setStatus('active'),
-            onmessage: handleMessage,
-            onerror: (e: ErrorEvent) => {
-              console.error('live onerror', e);
-              setError(e.message || 'Live セッションエラー');
-              setStatus('error');
-              teardown();
-            },
-            onclose: (e: CloseEvent) => {
-              console.warn('live onclose', e?.code, e?.reason);
-              // A close we initiated (stop/unmount/error path) is clean.
-              if (closingRef.current) {
-                setStatus((s) => (s === 'error' ? s : 'idle'));
-                return;
-              }
-              // Unexpected server disconnect — surface the reason so a bad
-              // model name or rejected config is visible on-device.
-              const why = e?.reason || `コード ${e?.code ?? '?'}`;
-              setError(`接続が切れました (${why})`);
-              setStatus('error');
-              teardown();
-            },
-          },
-          config: {
-            responseModalities: [Modality.AUDIO],
-            systemInstruction,
-            tools: [{ functionDeclarations: tools }],
-            outputAudioTranscription: {},
-          },
+          const ai = new GoogleGenAI({
+            apiKey: attempt.token,
+            httpOptions: { apiVersion: 'v1alpha' },
+          });
+          ai.live
+            .connect({
+              model: attempt.model,
+              callbacks: {
+                onopen: () => setStatus('connecting'),
+                onmessage: (msg) => {
+                  sawMessage = true;
+                  ok();
+                  if (settled) handleMessage(msg);
+                },
+                onerror: (e: ErrorEvent) => {
+                  console.error('live onerror', e);
+                  if (!settled) return fail(new Error(e.message || 'live error'));
+                  setError(e.message || 'Live セッションエラー');
+                  setStatus('error');
+                  teardown();
+                },
+                onclose: (e: CloseEvent) => {
+                  console.warn('live onclose', e?.code, e?.reason);
+                  const why = e?.reason || `コード ${e?.code ?? '?'}`;
+                  if (!settled) return fail(new Error(why));
+                  if (closingRef.current) {
+                    setStatus((s) => (s === 'error' ? s : 'idle'));
+                    return;
+                  }
+                  setError(`接続が切れました (${why})`);
+                  setStatus('error');
+                  teardown();
+                },
+              },
+              config: {
+                responseModalities: [Modality.AUDIO],
+                systemInstruction,
+                tools: [{ functionDeclarations: tools }],
+                outputAudioTranscription: {},
+              },
+            })
+            .then((s) => {
+              sess = s;
+              ok();
+            })
+            .catch((err) =>
+              fail(err instanceof Error ? err : new Error(String(err))),
+            );
         });
 
-      // Try the primary model; on connect failure fall back once (the token is
-      // minted with uses: 2 to allow this retry).
-      let session: Session;
-      try {
-        session = await connectWith(model);
-      } catch (primaryErr) {
-        if (!fallbackModel || fallbackModel === model) throw primaryErr;
-        console.warn(
-          `live: primary model "${model}" failed, falling back to "${fallbackModel}"`,
-          primaryErr,
-        );
-        session = await connectWith(fallbackModel);
+      let session: Session | null = null;
+      let lastErr: Error | null = null;
+      for (const attempt of attempts) {
+        try {
+          session = await connectAttempt(attempt);
+          break;
+        } catch (err) {
+          lastErr = err instanceof Error ? err : new Error(String(err));
+          console.warn(
+            `live: model "${attempt.model}" failed: ${lastErr.message}`,
+          );
+        }
       }
+      if (!session) throw lastErr ?? new Error('接続に失敗しました');
       sessionRef.current = session;
+      setStatus('active');
 
       // Mic → 16 kHz PCM → realtime input. Report the actual context rate.
       const rec = new MicRecorder();

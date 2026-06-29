@@ -34,40 +34,50 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return;
   }
 
-  // expireTime: hard ceiling on how long sessions started with this token may
-  // run (30 min). newSessionExpireTime: the token must be used to OPEN a
-  // session within this window (1 min) and handed straight to the client.
-  // uses: 2 so the client can retry once with the fallback model on the same
-  // token if the primary connect fails. The model is intentionally left
-  // unlocked (only responseModalities is constrained) so one token works for
-  // either model.
+  // expireTime: hard ceiling on how long sessions started with a token may run
+  // (30 min). newSessionExpireTime: the token must be used to OPEN a session
+  // within this window (1 min) and handed straight to the client. Each token is
+  // single-use and LOCKED to one model — leaving the model unlocked makes the
+  // service resolve the connect-time model as a project-scoped tuned model,
+  // which API/token auth rejects. For fallback we therefore mint a separate
+  // token per model and let the client try them in order.
   const now = Date.now();
   const expireTime = new Date(now + 30 * 60 * 1000).toISOString();
   const newSessionExpireTime = new Date(now + 60 * 1000).toISOString();
 
-  const tokenConfig: CreateAuthTokenConfig = {
-    uses: 2,
-    expireTime,
-    newSessionExpireTime,
-    liveConnectConstraints: {
-      config: {
-        responseModalities: [Modality.AUDIO],
+  const mint = async (model: string): Promise<string> => {
+    const tokenConfig: CreateAuthTokenConfig = {
+      uses: 1,
+      expireTime,
+      newSessionExpireTime,
+      liveConnectConstraints: {
+        model,
+        config: { responseModalities: [Modality.AUDIO] },
       },
-    },
+    };
+    const token = await ai.authTokens.create({ config: tokenConfig });
+    if (!token.name) throw new Error('token creation returned no name');
+    return token.name;
   };
 
   try {
-    const token = await ai.authTokens.create({ config: tokenConfig });
-    if (!token.name) {
-      res.status(502).json({ error: 'token creation returned no name' });
-      return;
+    const primary = { token: await mint(LIVE_MODEL), model: LIVE_MODEL };
+
+    // Fallback token is best-effort: if minting it fails (e.g. the fallback
+    // model is unavailable) the primary still works on its own.
+    let fallback: { token: string; model: string } | null = null;
+    if (LIVE_FALLBACK_MODEL && LIVE_FALLBACK_MODEL !== LIVE_MODEL) {
+      try {
+        fallback = {
+          token: await mint(LIVE_FALLBACK_MODEL),
+          model: LIVE_FALLBACK_MODEL,
+        };
+      } catch (e) {
+        console.warn('live-token: fallback mint failed', e);
+      }
     }
-    res.status(200).json({
-      token: token.name,
-      model: LIVE_MODEL,
-      fallbackModel: LIVE_FALLBACK_MODEL,
-      expireTime,
-    });
+
+    res.status(200).json({ primary, fallback, expireTime });
   } catch (e) {
     console.error('live-token error', e);
     const msg = e instanceof Error ? e.message : 'token creation failed';
