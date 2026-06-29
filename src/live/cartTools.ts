@@ -2,14 +2,10 @@ import type { CartEntry } from '../types';
 import type { ToolHandler } from './useLiveSession';
 
 // Voice-mode cart tool HANDLERS (browser side). The matching tool declarations
-// and the system prompt live in talkConfig.ts because the server has to bake
-// them into the ephemeral token — see that file for why. Re-exported here so
-// existing import sites keep working.
-export {
-  cartToolDeclarations,
-  TALK_SYSTEM_INSTRUCTION,
-  TALK_TEMPERATURE,
-} from './talkConfig';
+// and the system prompt live server-side in api/live-token.ts, because they
+// must be baked into the ephemeral token (client-supplied tools/prompt are
+// ignored on a token connection). The client only executes the calls, matching
+// on the tool name strings below.
 
 function labelOf(e: CartEntry): string {
   return e.refined?.name ?? e.yolo_label;

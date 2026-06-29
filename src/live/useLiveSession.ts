@@ -26,7 +26,7 @@ type Options = {
   videoEl: HTMLVideoElement | null;
   // Tool-call handlers, keyed by tool name. The tool DECLARATIONS, prompt and
   // temperature are baked into the ephemeral token server-side (see
-  // talkConfig.ts) — the client only executes the calls.
+  // api/live-token.ts) — the client only executes the calls.
   handlers: Record<string, ToolHandler>;
   // 0 disables video; otherwise the JPEG send interval in ms (1000 = 1fps).
   frameIntervalMs?: number;
