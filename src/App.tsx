@@ -1,9 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useCamera } from './useCamera';
-import { useLocalDetector } from './useLocalDetector';
-import { captureFrameJpeg } from './captureSnapshot';
 import { Button } from './ui/Button';
-import { DetectOverlay } from './live/DetectOverlay';
 import { CartView } from './cart/CartView';
 import { useLiveSession } from './live/useLiveSession';
 import {
@@ -11,16 +8,12 @@ import {
   createCartHandlers,
   TALK_SYSTEM_INSTRUCTION,
 } from './live/cartTools';
-import type { CartEntry, RefinedItem, TrackedBox } from './types';
+import type { CartEntry, RefinedItem } from './types';
 import './App.css';
 
 type Phase = 'idle' | 'live' | 'refining' | 'cart';
 
 const MAX_SELECTIONS = 30;
-
-const DEBUG =
-  typeof window !== 'undefined' &&
-  new URLSearchParams(window.location.search).get('debug') === '1';
 
 export default function App() {
   const [phase, setPhase] = useState<Phase>('idle');
@@ -29,22 +22,8 @@ export default function App() {
   // aggregate as a count after refining.
   const [cart, setCart] = useState<Map<number, CartEntry>>(new Map());
   const [refineError, setRefineError] = useState<string | null>(null);
-  const [tooManyVisible, setTooManyVisible] = useState(false);
-  const tooManyTimerRef = useRef<number | null>(null);
 
   const camera = useCamera();
-  const localDetector = useLocalDetector({
-    videoEl: camera.videoEl,
-    enabled: phase === 'live',
-  });
-
-  const {
-    boxesRef: localBoxesRef,
-    ready: detectorReady,
-    backend: detectorBackend,
-    error: detectorError,
-    stats: detectorStats,
-  } = localDetector;
   const cameraError = camera.error;
 
   const cartRef = useRef(cart);
@@ -52,9 +31,6 @@ export default function App() {
     cartRef.current = cart;
   });
 
-  // Set of selected instance_ids for the overlay's highlight, recomputed only
-  // when the cart changes.
-  const selectedIds = useMemo(() => new Set(cart.keys()), [cart]);
   const cartCount = cart.size;
 
   // Voice-mode cart talk. Voice entries get unique *negative* instance_ids so
@@ -89,54 +65,6 @@ export default function App() {
       await camera.start();
     }
   }, [camera]);
-
-  // A tap landed inside a detection box: add it to the cart (deduped, capped),
-  // capturing the current frame as the snapshot for refine-items.
-  const handlePick = useCallback(
-    (hit: TrackedBox) => {
-      const video = camera.videoEl;
-      if (!video) return;
-      if (cartRef.current.has(hit.instance_id)) return;
-      if (cartRef.current.size >= MAX_SELECTIONS) {
-        setTooManyVisible(true);
-        if (tooManyTimerRef.current !== null) {
-          window.clearTimeout(tooManyTimerRef.current);
-        }
-        tooManyTimerRef.current = window.setTimeout(() => {
-          setTooManyVisible(false);
-          tooManyTimerRef.current = null;
-        }, 2200);
-        return;
-      }
-
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      const [bx1, by1, bx2, by2] = hit.bbox;
-      const norm: [number, number, number, number] =
-        vw && vh ? [bx1 / vw, by1 / vh, bx2 / vw, by2 / vh] : [0, 0, 1, 1];
-
-      let snapshot = '';
-      try {
-        snapshot = captureFrameJpeg(video);
-      } catch (err) {
-        console.warn('snapshot failed', err);
-      }
-
-      setCart((prev) => {
-        if (prev.has(hit.instance_id)) return prev;
-        const next = new Map(prev);
-        next.set(hit.instance_id, {
-          instance_id: hit.instance_id,
-          yolo_label: hit.label,
-          snapshot_b64: snapshot,
-          snapshot_bbox: norm,
-          source: 'tap',
-        });
-        return next;
-      });
-    },
-    [camera.videoEl],
-  );
 
   const stopTalk = talk.stop;
   const handleStopLive = useCallback(async () => {
@@ -233,10 +161,9 @@ export default function App() {
           <img src="/dustalk-logo.png" alt="Dustalk" className="dustalk-logo" />
           <h1>SmartCamera</h1>
           <p className="lead">
-            カメラを起動 → 写った物体に枠が出る → タップでカゴに追加 →
-            停止すると AI が選択した物の詳細を返します。
+            カメラを起動 → 🎙 を押して話しかけると、AI
+            が捨てる物をカゴに追加します。
           </p>
-          {detectorError && <div className="status err">{detectorError}</div>}
           {cameraError && <div className="status err">{cameraError}</div>}
           <Button onClick={handleStart}>カメラ開始</Button>
         </div>
@@ -251,22 +178,15 @@ export default function App() {
             muted
             className="video"
           />
-          <DetectOverlay
-            video={camera.videoEl}
-            boxesRef={localBoxesRef}
-            selectedIds={selectedIds}
-            onPick={handlePick}
-          />
           <div className="badge">🛒 {cartCount}</div>
           <div className="live-cart-panel">
             {cartCount === 0 ? (
-              <div className="live-cart-empty">枠をタップしてカゴに追加</div>
+              <div className="live-cart-empty">
+                🎙 を押して話しかけてください
+              </div>
             ) : (
-              // While live, every cart entry is labeled "物体" since DEIMv2
-              // class predictions are unreliable. Show a single "選択中 × N"
-              // chip with a clear-all button instead of per-label chips.
               <div className="live-cart-chip">
-                <span className="live-cart-chip-label">選択中</span>
+                <span className="live-cart-chip-label">カゴ</span>
                 <span className="live-cart-chip-count">×{cartCount}</span>
                 <button
                   className="live-cart-chip-remove"
@@ -278,11 +198,6 @@ export default function App() {
               </div>
             )}
           </div>
-          {tooManyVisible && (
-            <div className="error">
-              選択は {MAX_SELECTIONS} 個までです。停止して詳細取得に進んでください。
-            </div>
-          )}
           {talk.status !== 'idle' && (
             <div className={`talk-status ${talk.status}`}>
               {talk.status === 'connecting' && '接続中…'}
@@ -302,24 +217,7 @@ export default function App() {
           >
             {talkActive ? '🔴' : '🎙'}
           </button>
-          {!detectorReady && !detectorError && (
-            <div className="preview-tip">モデル読み込み中…</div>
-          )}
-          {detectorError && <div className="error">エラー: {detectorError}</div>}
           {cameraError && <div className="error">{cameraError}</div>}
-          {DEBUG && (
-            <div className="debug">
-              <div>backend: {detectorBackend ?? '—'}</div>
-              <div>infs: {detectorStats.inferences}</div>
-              <div>
-                maxScore: {detectorStats.maxScore.toFixed(3)} raw:{' '}
-                {detectorStats.rawCount} kept: {detectorStats.keptCount}
-              </div>
-              {detectorStats.lastError && (
-                <div className="debug-err">err: {detectorStats.lastError}</div>
-              )}
-            </div>
-          )}
         </div>
       )}
 

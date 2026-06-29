@@ -58,6 +58,9 @@ export function useLiveSession({
   const recRef = useRef<MicRecorder | null>(null);
   const playerRef = useRef<AudioPlayer | null>(null);
   const frameTimerRef = useRef<number | null>(null);
+  // True while we are the ones closing the socket, so the onclose callback can
+  // tell a user-initiated stop from an unexpected server disconnect.
+  const closingRef = useRef(false);
 
   // Mirror props into refs so the long-lived session callbacks always see the
   // current video element / handlers without reconnecting.
@@ -79,6 +82,7 @@ export function useLiveSession({
     recRef.current = null;
     playerRef.current?.close();
     playerRef.current = null;
+    closingRef.current = true;
     try {
       sessionRef.current?.close();
     } catch {
@@ -146,6 +150,7 @@ export function useLiveSession({
     setStatus('connecting');
     setError(null);
     setCaption('');
+    closingRef.current = false;
 
     try {
       // Resume the playback context FIRST, while still inside the user-gesture
@@ -179,13 +184,24 @@ export function useLiveSession({
             onopen: () => setStatus('active'),
             onmessage: handleMessage,
             onerror: (e: ErrorEvent) => {
+              console.error('live onerror', e);
               setError(e.message || 'Live セッションエラー');
               setStatus('error');
               teardown();
             },
-            onclose: () => {
-              // Only reflect a clean close if we didn't already error out.
-              setStatus((s) => (s === 'error' ? s : 'idle'));
+            onclose: (e: CloseEvent) => {
+              console.warn('live onclose', e?.code, e?.reason);
+              // A close we initiated (stop/unmount/error path) is clean.
+              if (closingRef.current) {
+                setStatus((s) => (s === 'error' ? s : 'idle'));
+                return;
+              }
+              // Unexpected server disconnect — surface the reason so a bad
+              // model name or rejected config is visible on-device.
+              const why = e?.reason || `コード ${e?.code ?? '?'}`;
+              setError(`接続が切れました (${why})`);
+              setStatus('error');
+              teardown();
             },
           },
           config: {
