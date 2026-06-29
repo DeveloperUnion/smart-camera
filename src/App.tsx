@@ -5,6 +5,12 @@ import { captureFrameJpeg } from './captureSnapshot';
 import { Button } from './ui/Button';
 import { DetectOverlay } from './live/DetectOverlay';
 import { CartView } from './cart/CartView';
+import { useLiveSession } from './live/useLiveSession';
+import {
+  cartToolDeclarations,
+  createCartHandlers,
+  TALK_SYSTEM_INSTRUCTION,
+} from './live/cartTools';
 import type { CartEntry, RefinedItem, TrackedBox } from './types';
 import './App.css';
 
@@ -50,6 +56,31 @@ export default function App() {
   // when the cart changes.
   const selectedIds = useMemo(() => new Set(cart.keys()), [cart]);
   const cartCount = cart.size;
+
+  // Voice-mode cart talk. Voice entries get unique *negative* instance_ids so
+  // they never collide with the tracker's positive ids; tools read the live
+  // cart via cartRef and mutate it through setCart.
+  const voiceIdRef = useRef(-1);
+  // Rebuilt each render (cheap); useLiveSession mirrors it into a ref, so a
+  // fresh object never reconnects the session. The handlers only read cartRef/
+  // voiceIdRef at call time (in tool callbacks), never during render.
+  const cartHandlers = createCartHandlers({
+    getCart: () => cartRef.current,
+    setCart,
+    nextVoiceId: () => voiceIdRef.current--,
+    max: MAX_SELECTIONS,
+  });
+  const talk = useLiveSession({
+    videoEl: camera.videoEl,
+    tools: cartToolDeclarations,
+    handlers: cartHandlers,
+    systemInstruction: TALK_SYSTEM_INSTRUCTION,
+  });
+  const talkActive = talk.status === 'active' || talk.status === 'connecting';
+  const toggleTalk = useCallback(() => {
+    if (talkActive) talk.stop();
+    else void talk.start();
+  }, [talkActive, talk]);
 
   const handleStart = useCallback(async () => {
     setRefineError(null);
@@ -107,7 +138,9 @@ export default function App() {
     [camera.videoEl],
   );
 
+  const stopTalk = talk.stop;
   const handleStopLive = useCallback(async () => {
+    stopTalk();
     camera.stop();
     const entries = Array.from(cartRef.current.values()).filter(
       (e) => (e.snapshot_b64?.length ?? 0) > 0,
@@ -176,13 +209,14 @@ export default function App() {
     } finally {
       setPhase('cart');
     }
-  }, [camera]);
+  }, [camera, stopTalk]);
 
   const handleReset = useCallback(() => {
+    stopTalk();
     setCart(new Map());
     setRefineError(null);
     setPhase('idle');
-  }, []);
+  }, [stopTalk]);
 
   const handleRemove = useCallback((ids: number[]) => {
     setCart((prev) => {
@@ -249,8 +283,24 @@ export default function App() {
               選択は {MAX_SELECTIONS} 個までです。停止して詳細取得に進んでください。
             </div>
           )}
+          {talk.status !== 'idle' && (
+            <div className={`talk-status ${talk.status}`}>
+              {talk.status === 'connecting' && '接続中…'}
+              {talk.status === 'active' &&
+                (talk.caption || '🎙 話しかけてください（例:「ペットボトル2つ追加して」）')}
+              {talk.status === 'error' &&
+                `音声エラー: ${talk.error ?? '不明'}`}
+            </div>
+          )}
           <button className="stop" onClick={handleStopLive}>
             停止
+          </button>
+          <button
+            className={`talk-btn ${talkActive ? 'active' : ''}`}
+            onClick={toggleTalk}
+            aria-label={talkActive ? '音声モードを終了' : '音声モードを開始'}
+          >
+            {talkActive ? '🔴' : '🎙'}
           </button>
           {!detectorReady && !detectorError && (
             <div className="preview-tip">モデル読み込み中…</div>
