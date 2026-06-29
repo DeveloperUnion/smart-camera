@@ -247,6 +247,9 @@ export function useLiveSession({
                 systemInstruction,
                 tools: [{ functionDeclarations: tools }],
                 outputAudioTranscription: {},
+                // Low temperature so the model follows the "add to cart, don't
+                // lecture" instruction instead of drifting into conversation.
+                temperature: 0.2,
               },
             })
             .then((s) => {
