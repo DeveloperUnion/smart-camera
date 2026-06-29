@@ -4,6 +4,11 @@ import {
   Modality,
   type CreateAuthTokenConfig,
 } from '@google/genai';
+import {
+  cartToolDeclarations,
+  TALK_SYSTEM_INSTRUCTION,
+  TALK_TEMPERATURE,
+} from '../src/live/talkConfig';
 
 export const config = { maxDuration: 15 };
 
@@ -45,6 +50,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const expireTime = new Date(now + 30 * 60 * 1000).toISOString();
   const newSessionExpireTime = new Date(now + 60 * 1000).toISOString();
 
+  // Bake the FULL session config into the token. Client-supplied
+  // systemInstruction/tools are IGNORED when connecting with an ephemeral
+  // token — only what's locked here takes effect — so the prompt, tools and
+  // temperature must live on this side or the session is a plain chat bot.
   const mint = async (model: string): Promise<string> => {
     const tokenConfig: CreateAuthTokenConfig = {
       uses: 1,
@@ -52,7 +61,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       newSessionExpireTime,
       liveConnectConstraints: {
         model,
-        config: { responseModalities: [Modality.AUDIO] },
+        config: {
+          responseModalities: [Modality.AUDIO],
+          systemInstruction: TALK_SYSTEM_INSTRUCTION,
+          tools: [{ functionDeclarations: cartToolDeclarations }],
+          outputAudioTranscription: {},
+          temperature: TALK_TEMPERATURE,
+        },
       },
     };
     const token = await ai.authTokens.create({ config: tokenConfig });
