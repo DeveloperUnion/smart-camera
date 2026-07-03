@@ -1,15 +1,23 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useCamera } from './useCamera';
+import { useLocalDetector } from './useLocalDetector';
+import { captureBoxCropJpeg, captureFrameJpeg } from './captureSnapshot';
 import { Button } from './ui/Button';
+import { DetectOverlay } from './live/DetectOverlay';
 import { CartView } from './cart/CartView';
 import { useLiveSession } from './live/useLiveSession';
+import type { RetainedFrame } from './live/useLiveSession';
 import { createCartHandlers } from './live/cartTools';
-import type { CartEntry, RefinedItem } from './types';
+import type { CartEntry, RefinedItem, TrackedBox } from './types';
 import './App.css';
 
 type Phase = 'idle' | 'live' | 'refining' | 'cart';
 
 const MAX_SELECTIONS = 30;
+
+const DEBUG =
+  typeof window !== 'undefined' &&
+  new URLSearchParams(window.location.search).get('debug') === '1';
 
 export default function App() {
   const [phase, setPhase] = useState<Phase>('idle');
@@ -18,8 +26,22 @@ export default function App() {
   // aggregate as a count after refining.
   const [cart, setCart] = useState<Map<number, CartEntry>>(new Map());
   const [refineError, setRefineError] = useState<string | null>(null);
+  const [tooManyVisible, setTooManyVisible] = useState(false);
+  const tooManyTimerRef = useRef<number | null>(null);
 
   const camera = useCamera();
+  const localDetector = useLocalDetector({
+    videoEl: camera.videoEl,
+    enabled: phase === 'live',
+  });
+
+  const {
+    boxesRef: localBoxesRef,
+    ready: detectorReady,
+    backend: detectorBackend,
+    error: detectorError,
+    stats: detectorStats,
+  } = localDetector;
   const cameraError = camera.error;
 
   const cartRef = useRef(cart);
@@ -27,12 +49,20 @@ export default function App() {
     cartRef.current = cart;
   });
 
+  // Set of selected instance_ids for the overlay's highlight, recomputed only
+  // when the cart changes.
+  const selectedIds = useMemo(() => new Set(cart.keys()), [cart]);
   const cartCount = cart.size;
 
   // Voice-mode cart talk. Voice entries get unique *negative* instance_ids so
   // they never collide with the tracker's positive ids; tools read the live
   // cart via cartRef and mutate it through setCart.
   const voiceIdRef = useRef(-1);
+  // Last frame sent to the Live session. Owned here (not by useLiveSession)
+  // because the cart handlers below are created before the hook runs — the
+  // hook writes it, the add_to_cart handler reads it to crop the object the
+  // model referenced.
+  const lastFrameRef = useRef<RetainedFrame | null>(null);
   // Rebuilt each render (cheap); useLiveSession mirrors it into a ref, so a
   // fresh object never reconnects the session. The handlers only read cartRef/
   // voiceIdRef at call time (in tool callbacks), never during render.
@@ -41,10 +71,13 @@ export default function App() {
     setCart,
     nextVoiceId: () => voiceIdRef.current--,
     max: MAX_SELECTIONS,
+    getLastFrame: () => lastFrameRef.current,
+    getVideoEl: () => camera.videoEl,
   });
   const talk = useLiveSession({
     videoEl: camera.videoEl,
     handlers: cartHandlers,
+    lastFrameRef,
   });
   const talkActive = talk.status === 'active' || talk.status === 'connecting';
   const toggleTalk = useCallback(() => {
@@ -59,6 +92,60 @@ export default function App() {
       await camera.start();
     }
   }, [camera]);
+
+  // A tap landed inside a detection box: add it to the cart (deduped, capped),
+  // cropping the box (with margin) out of the current frame as the snapshot.
+  const handlePick = useCallback(
+    (hit: TrackedBox) => {
+      const video = camera.videoEl;
+      if (!video) return;
+      if (cartRef.current.has(hit.instance_id)) return;
+      if (cartRef.current.size >= MAX_SELECTIONS) {
+        setTooManyVisible(true);
+        if (tooManyTimerRef.current !== null) {
+          window.clearTimeout(tooManyTimerRef.current);
+        }
+        tooManyTimerRef.current = window.setTimeout(() => {
+          setTooManyVisible(false);
+          tooManyTimerRef.current = null;
+        }, 2200);
+        return;
+      }
+
+      let snapshot = '';
+      let bbox: [number, number, number, number] = [0, 0, 1, 1];
+      try {
+        const crop = captureBoxCropJpeg(video, hit.bbox);
+        snapshot = crop.data;
+        bbox = crop.innerBox;
+      } catch (err) {
+        console.warn('box crop failed, falling back to full frame', err);
+        try {
+          snapshot = captureFrameJpeg(video);
+          const vw = video.videoWidth;
+          const vh = video.videoHeight;
+          const [bx1, by1, bx2, by2] = hit.bbox;
+          if (vw && vh) bbox = [bx1 / vw, by1 / vh, bx2 / vw, by2 / vh];
+        } catch (err2) {
+          console.warn('snapshot failed', err2);
+        }
+      }
+
+      setCart((prev) => {
+        if (prev.has(hit.instance_id)) return prev;
+        const next = new Map(prev);
+        next.set(hit.instance_id, {
+          instance_id: hit.instance_id,
+          yolo_label: hit.label,
+          snapshot_b64: snapshot,
+          snapshot_bbox: bbox,
+          source: 'tap',
+        });
+        return next;
+      });
+    },
+    [camera.videoEl],
+  );
 
   const stopTalk = talk.stop;
   const handleStopLive = useCallback(async () => {
@@ -97,19 +184,15 @@ export default function App() {
       const data = (await res.json()) as {
         items?: Array<{ id: number; refined: RefinedItem }>;
       };
+      // Snapshots are kept (not cleared) — the cart screen shows them as
+      // thumbnails for later confirmation. They're margin-cropped JPEGs, so
+      // 30 of them is a few MB of base64 at most.
       setCart((prev) => {
         const next = new Map(prev);
         for (const r of data.items ?? []) {
           const cur = next.get(r.id);
           if (cur) {
-            next.set(r.id, { ...cur, refined: r.refined, snapshot_b64: '' });
-          }
-        }
-        // Also clear snapshots for entries Gemini didn't return — keeping the
-        // YOLO fallback label but freeing the JPEG bytes.
-        for (const [id, cur] of next) {
-          if (cur.snapshot_b64) {
-            next.set(id, { ...cur, snapshot_b64: '' });
+            next.set(r.id, { ...cur, refined: r.refined });
           }
         }
         return next;
@@ -117,17 +200,6 @@ export default function App() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setRefineError(msg);
-      // Clear snapshots even on failure — they're useless from here on and 30
-      // JPEGs in memory is enough to matter on iOS.
-      setCart((prev) => {
-        const next = new Map(prev);
-        for (const [id, cur] of next) {
-          if (cur.snapshot_b64) {
-            next.set(id, { ...cur, snapshot_b64: '' });
-          }
-        }
-        return next;
-      });
     } finally {
       setPhase('cart');
     }
@@ -155,9 +227,11 @@ export default function App() {
           <img src="/dustalk-logo.png" alt="Dustalk" className="dustalk-logo" />
           <h1>SmartCamera</h1>
           <p className="lead">
-            カメラを起動 → 🎙 を押して話しかけると、AI
-            が捨てる物をカゴに追加します。
+            カメラを起動 → 写った物体の枠をタップ、または 🎙
+            で話しかけると、捨てる物がカゴに入ります。停止すると AI
+            が詳細を返します。
           </p>
+          {detectorError && <div className="status err">{detectorError}</div>}
           {cameraError && <div className="status err">{cameraError}</div>}
           <Button onClick={handleStart}>カメラ開始</Button>
         </div>
@@ -172,11 +246,17 @@ export default function App() {
             muted
             className="video"
           />
+          <DetectOverlay
+            video={camera.videoEl}
+            boxesRef={localBoxesRef}
+            selectedIds={selectedIds}
+            onPick={handlePick}
+          />
           <div className="badge">🛒 {cartCount}</div>
           <div className="live-cart-panel">
             {cartCount === 0 ? (
               <div className="live-cart-empty">
-                🎙 を押して話しかけてください
+                枠をタップ、または 🎙 で話しかけてカゴに追加
               </div>
             ) : (
               <div className="live-cart-chip">
@@ -192,6 +272,11 @@ export default function App() {
               </div>
             )}
           </div>
+          {tooManyVisible && (
+            <div className="error">
+              選択は {MAX_SELECTIONS} 個までです。停止して詳細取得に進んでください。
+            </div>
+          )}
           {talk.status !== 'idle' && (
             <div className={`talk-status ${talk.status}`}>
               {talk.status === 'connecting' && '接続中…'}
@@ -211,7 +296,24 @@ export default function App() {
           >
             {talkActive ? '🔴' : '🎙'}
           </button>
+          {!detectorReady && !detectorError && (
+            <div className="preview-tip">モデル読み込み中…</div>
+          )}
+          {detectorError && <div className="error">エラー: {detectorError}</div>}
           {cameraError && <div className="error">{cameraError}</div>}
+          {DEBUG && (
+            <div className="debug">
+              <div>backend: {detectorBackend ?? '—'}</div>
+              <div>infs: {detectorStats.inferences}</div>
+              <div>
+                maxScore: {detectorStats.maxScore.toFixed(3)} raw:{' '}
+                {detectorStats.rawCount} kept: {detectorStats.keptCount}
+              </div>
+              {detectorStats.lastError && (
+                <div className="debug-err">err: {detectorStats.lastError}</div>
+              )}
+            </div>
+          )}
         </div>
       )}
 

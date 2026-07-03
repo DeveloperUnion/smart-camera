@@ -35,20 +35,22 @@ export type RefinedItem = {
 // the same physical object twice is deduped while distinct instances of the
 // same label aggregate as a count after refining.
 //
-// `source` records how it entered the cart: 'tap' (the existing live tap flow)
-// or 'voice' (the upcoming Gemini Live talk mode). `note`/`position` are
-// optional free-text annotations the voice mode can attach. `snapshot_b64` is
-// optional because the voice path may add an item without a captured frame; the
-// tap path always provides one (then clears it after refine-items returns).
+// `source` records how it entered the cart: 'tap' (box tap on the live
+// overlay) or 'voice' (Gemini Live talk mode). `note`/`position` are optional
+// free-text annotations the voice mode can attach. `snapshot_b64` is optional
+// because either path may fail to capture a frame (camera not ready, no frame
+// sent to Live yet).
 export type CartEntry = {
   instance_id: number;
-  // YOLO's coarse label; always present so the cart can show something
-  // immediately on tap, and so refine-items has a hint to send to Gemini.
+  // Coarse label: the detector's generic label on tap, the spoken name on
+  // voice. Shown until refined, and sent to refine-items as a hint.
   yolo_label: string;
-  // Base64 JPEG (no data: prefix). Cleared after refine-items returns to free
-  // memory. May be absent entirely on the voice path.
+  // Base64 JPEG (no data: prefix): a margin-padded crop of the object (or the
+  // full frame when no box was available). KEPT after refine-items returns —
+  // the cart screen shows it as the entry's confirmation thumbnail.
   snapshot_b64?: string;
-  // Normalized 0-1 xyxy in the captured frame's coordinate space.
+  // Normalized 0-1 xyxy of the object WITHIN the snapshot image (inner box).
+  // [0, 0, 1, 1] when the snapshot is an uncropped full frame.
   snapshot_bbox: [number, number, number, number];
   refined?: RefinedItem;
   source: 'tap' | 'voice';

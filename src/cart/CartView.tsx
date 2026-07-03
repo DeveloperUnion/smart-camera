@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { CartEntry, RefinedItem } from '../types';
 import { Button } from '../ui/Button';
 
@@ -33,15 +34,18 @@ type Props = {
 };
 
 export function CartView({ cart, refineError, onRemove, onReset }: Props) {
+  // Snapshot being viewed full-screen (base64 JPEG), or null when closed.
+  const [lightbox, setLightbox] = useState<string | null>(null);
+
   // Group by displayed label so distinct instances of the same product collapse
   // into one row with a × count (refined names group together, and so do
   // un-refined YOLO labels).
-  const groups = new Map<string, { ids: number[]; entry: CartEntry }>();
+  const groups = new Map<string, CartEntry[]>();
   for (const entry of cart.values()) {
     const key = displayLabel(entry);
     const existing = groups.get(key);
-    if (existing) existing.ids.push(entry.instance_id);
-    else groups.set(key, { ids: [entry.instance_id], entry });
+    if (existing) existing.push(entry);
+    else groups.set(key, [entry]);
   }
   const cartGroups = Array.from(groups.entries());
 
@@ -57,8 +61,10 @@ export function CartView({ cart, refineError, onRemove, onReset }: Props) {
         <p className="lead">何も追加されていません。</p>
       ) : (
         <ul className="cart">
-          {cartGroups.map(([label, { ids, entry }]) => {
-            const lines = sublines(entry);
+          {cartGroups.map(([label, entries]) => {
+            const ids = entries.map((e) => e.instance_id);
+            const lines = sublines(entries[0]);
+            const thumbs = entries.filter((e) => e.snapshot_b64);
             return (
               <li key={label}>
                 <span className="label">
@@ -75,6 +81,21 @@ export function CartView({ cart, refineError, onRemove, onReset }: Props) {
                       {line}
                     </span>
                   ))}
+                  {thumbs.length > 0 && (
+                    <span className="cart-thumbs">
+                      {thumbs.map((e) => (
+                        <img
+                          key={e.instance_id}
+                          className="cart-thumb"
+                          loading="lazy"
+                          decoding="async"
+                          src={`data:image/jpeg;base64,${e.snapshot_b64}`}
+                          alt={label}
+                          onClick={() => setLightbox(e.snapshot_b64!)}
+                        />
+                      ))}
+                    </span>
+                  )}
                 </span>
                 <span className="count">× {ids.length}</span>
                 <button
@@ -90,6 +111,16 @@ export function CartView({ cart, refineError, onRemove, onReset }: Props) {
         </ul>
       )}
       <Button onClick={onReset}>最初から</Button>
+      {lightbox && (
+        <div
+          className="lightbox"
+          role="dialog"
+          aria-label="スナップショット拡大表示"
+          onClick={() => setLightbox(null)}
+        >
+          <img src={`data:image/jpeg;base64,${lightbox}`} alt="" />
+        </div>
+      )}
     </div>
   );
 }
