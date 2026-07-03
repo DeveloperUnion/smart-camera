@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { RefObject } from 'react';
 import { GoogleGenAI } from '@google/genai';
 import type {
   FunctionResponse,
@@ -9,6 +10,11 @@ import { MicRecorder, AudioPlayer } from './audio';
 import { captureFrameJpeg } from '../captureSnapshot';
 
 export type LiveStatus = 'idle' | 'connecting' | 'active' | 'error';
+
+// The last video frame actually SENT to the Live session. The model's
+// add_to_cart decisions are grounded in this image, so cropping from it (not a
+// freshly captured frame) keeps model perception and crop source consistent.
+export type RetainedFrame = { data: string; ts: number };
 
 // One (ephemeral token, locked model) pair from /api/live-token, tried in order.
 type Attempt = { token: string; model: string };
@@ -30,6 +36,9 @@ type Options = {
   handlers: Record<string, ToolHandler>;
   // 0 disables video; otherwise the JPEG send interval in ms (1000 = 1fps).
   frameIntervalMs?: number;
+  // Owned by the caller (it's read by tool handlers created before this hook
+  // runs). Written here right after each frame is sent; cleared on start/stop.
+  lastFrameRef?: RefObject<RetainedFrame | null>;
 };
 
 export type LiveSession = {
@@ -50,6 +59,7 @@ export function useLiveSession({
   videoEl,
   handlers,
   frameIntervalMs = 1000,
+  lastFrameRef,
 }: Options): LiveSession {
   const [status, setStatus] = useState<LiveStatus>('idle');
   const [error, setError] = useState<string | null>(null);
@@ -90,7 +100,11 @@ export function useLiveSession({
       // already closed
     }
     sessionRef.current = null;
-  }, []);
+    // Don't leak the previous session's frame into the next one. Tool handlers
+    // read the frame into a local at their start, so an in-flight add_to_cart
+    // still completes with the frame it saw.
+    if (lastFrameRef) lastFrameRef.current = null;
+  }, [lastFrameRef]);
 
   const stop = useCallback(() => {
     teardown();
@@ -152,6 +166,7 @@ export function useLiveSession({
     setError(null);
     setCaption('');
     closingRef.current = false;
+    if (lastFrameRef) lastFrameRef.current = null;
 
     try {
       // Resume the playback context FIRST, while still inside the user-gesture
@@ -288,6 +303,9 @@ export function useLiveSession({
           try {
             const jpeg = captureFrameJpeg(v);
             s.sendRealtimeInput({ video: { data: jpeg, mimeType: 'image/jpeg' } });
+            if (lastFrameRef) {
+              lastFrameRef.current = { data: jpeg, ts: Date.now() };
+            }
           } catch {
             // video not ready yet — skip this tick
           }
@@ -302,7 +320,7 @@ export function useLiveSession({
       setStatus('error');
       teardown();
     }
-  }, [handleMessage, frameIntervalMs, teardown]);
+  }, [handleMessage, frameIntervalMs, teardown, lastFrameRef]);
 
   // Tear everything down on unmount.
   useEffect(() => teardown, [teardown]);

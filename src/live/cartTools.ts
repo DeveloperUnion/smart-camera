@@ -1,5 +1,7 @@
 import type { CartEntry } from '../types';
-import type { ToolHandler } from './useLiveSession';
+import type { RetainedFrame, ToolHandler } from './useLiveSession';
+import { captureFrameJpeg, cropJpegBase64 } from '../captureSnapshot';
+import type { NormBox } from '../captureSnapshot';
 
 // Voice-mode cart tool HANDLERS (browser side). The matching tool declarations
 // and the system prompt live server-side in api/live-token.ts, because they
@@ -27,6 +29,12 @@ type Deps = {
   // the tracker's positive ids.
   nextVoiceId: () => number;
   max: number;
+  // The last frame actually sent to the Live session (null before the first
+  // send). add_to_cart crops the model-referenced object out of it.
+  getLastFrame: () => RetainedFrame | null;
+  // Fallback capture source for a voice add that lands before any frame was
+  // sent (e.g. speaking within the first second of the session).
+  getVideoEl: () => HTMLVideoElement | null;
 };
 
 export function createCartHandlers({
@@ -34,13 +42,39 @@ export function createCartHandlers({
   setCart,
   nextVoiceId,
   max,
+  getLastFrame,
+  getVideoEl,
 }: Deps): Record<string, ToolHandler> {
   return {
-    add_to_cart: (args) => {
+    add_to_cart: async (args) => {
       const name = String(args.name ?? '').trim() || '物体';
       const count = Math.max(1, Math.floor(Number(args.count) || 1));
       const note = args.note ? String(args.note) : undefined;
       const position = args.position ? String(args.position) : undefined;
+
+      // Read the frame ONCE up front so a concurrent stop/teardown (which
+      // nulls the ref) can't pull it out from under the crop below.
+      const frame = getLastFrame();
+      let snap: { data: string; innerBox: NormBox } | null = null;
+      if (frame) {
+        try {
+          snap = await cropJpegBase64(frame.data, args.box_2d);
+        } catch {
+          snap = null; // decode failed — fall through to the full frame
+        }
+        // Missing/invalid box_2d → keep the full retained frame uncropped.
+        if (!snap) snap = { data: frame.data, innerBox: [0, 0, 1, 1] };
+      } else {
+        // No frame sent yet — best effort: capture the current camera image.
+        const v = getVideoEl();
+        if (v) {
+          try {
+            snap = { data: captureFrameJpeg(v), innerBox: [0, 0, 1, 1] };
+          } catch {
+            // camera not ready either — add without a snapshot, as before
+          }
+        }
+      }
 
       const cur = getCart();
       const room = Math.max(0, max - cur.size);
@@ -48,10 +82,12 @@ export function createCartHandlers({
 
       const newEntries: CartEntry[] = [];
       for (let i = 0; i < toAdd; i++) {
+        // count > 1 shares one snapshot: same string reference, no extra memory.
         newEntries.push({
           instance_id: nextVoiceId(),
           yolo_label: name,
-          snapshot_bbox: [0, 0, 1, 1],
+          snapshot_b64: snap?.data,
+          snapshot_bbox: snap?.innerBox ?? [0, 0, 1, 1],
           source: 'voice',
           note,
           position,
