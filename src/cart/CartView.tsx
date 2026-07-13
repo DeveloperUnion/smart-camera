@@ -54,7 +54,7 @@ export function CartView({ cart, refineError, onRemove, onReset }: Props) {
       <h1>カゴの中身</h1>
       {refineError && (
         <div className="status err">
-          詳細取得に失敗しました ({refineError})。YOLO の暫定ラベルで表示しています。
+          詳細取得に失敗しました。暫定の名前で表示しています。
         </div>
       )}
       {cartGroups.length === 0 ? (

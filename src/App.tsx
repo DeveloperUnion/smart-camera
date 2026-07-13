@@ -177,7 +177,7 @@ export default function App() {
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         if (res.status === 503) {
-          throw new Error('Geminiが一時的に混み合っています。少し時間をおいて再試行してください。');
+          throw new Error('サーバーが一時的に混み合っています。少し時間をおいて再試行してください。');
         }
         throw new Error(body?.error || `HTTP ${res.status}`);
       }
@@ -198,6 +198,9 @@ export default function App() {
         return next;
       });
     } catch (err) {
+      // The raw message may name the upstream model/provider, so the cart
+      // banner shows a generic line; keep the detail here for debugging.
+      console.warn('refine-items failed', err);
       const msg = err instanceof Error ? err.message : String(err);
       setRefineError(msg);
     } finally {
@@ -297,7 +300,7 @@ export default function App() {
             {talkActive ? '🔴' : '🎙'}
           </button>
           {!detectorReady && !detectorError && (
-            <div className="preview-tip">モデル読み込み中…</div>
+            <div className="preview-tip">準備中…</div>
           )}
           {detectorError && <div className="error">エラー: {detectorError}</div>}
           {cameraError && <div className="error">{cameraError}</div>}
@@ -326,7 +329,7 @@ export default function App() {
             <div className="spinner" />
             <div className="analyzing-text">解析中…</div>
             <div className="analyzing-sub">
-              選択した {cart.size} 個を Gemini で詳細化中
+              選択した {cart.size} 個の詳細を取得中
             </div>
           </div>
         </div>
