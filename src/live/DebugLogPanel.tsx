@@ -1,5 +1,11 @@
 import { useState, useSyncExternalStore } from 'react';
-import { subscribe, getLog, clearLog, formatLog } from './debugLog';
+import {
+  subscribe,
+  getLog,
+  clearLog,
+  formatLog,
+  logSession,
+} from './debugLog';
 
 // Floating on-device log viewer. A small button toggles a panel listing the
 // persisted `[live]` diagnostics (newest at the bottom) with Copy / Clear, so
@@ -35,7 +41,9 @@ export function DebugLogPanel() {
       {open && (
         <div className="debug-panel" role="dialog" aria-label="デバッグログ">
           <div className="debug-panel-head">
-            <span>ログ {entries.length}件</span>
+            <span>
+              ログ {entries.length}件 · <code>{logSession}</code>
+            </span>
             <div className="debug-panel-actions">
               <button onClick={copy}>{copied ? 'コピー済' : 'コピー'}</button>
               <button onClick={clearLog}>クリア</button>
