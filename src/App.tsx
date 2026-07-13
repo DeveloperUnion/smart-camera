@@ -228,7 +228,7 @@ export default function App() {
       {phase === 'idle' && (
         <div className="screen idle">
           <img src="/dustalk-logo.png" alt="Dustalk" className="dustalk-logo" />
-          <h1>SmartCamera</h1>
+          <h1>動画アシスタント</h1>
           <p className="lead">
             カメラを起動 → 写った物体の枠をタップ、または 🎙
             で話しかけると、捨てる物がカゴに入ります。停止すると AI
@@ -284,7 +284,7 @@ export default function App() {
             <div className={`talk-status ${talk.status}`}>
               {talk.status === 'connecting' && '接続中…'}
               {talk.status === 'active' &&
-                (talk.caption || '🎙 話しかけてください（例:「ペットボトル2つ追加して」）')}
+                '🎙 話しかけてください（例:「ペットボトル2つ追加して」）'}
               {talk.status === 'error' &&
                 `音声エラー: ${talk.error ?? '不明'}`}
             </div>
