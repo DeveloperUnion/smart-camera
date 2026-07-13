@@ -72,6 +72,9 @@ export function useLiveSession({
   // True while we are the ones closing the socket, so the onclose callback can
   // tell a user-initiated stop from an unexpected server disconnect.
   const closingRef = useRef(false);
+  // Accumulates the current turn's assistant transcript purely for diagnostics
+  // (logged on interrupt / turnComplete to see how far a confirmation got).
+  const turnTextRef = useRef('');
 
   // Mirror props into refs so the long-lived session callbacks always see the
   // current video element / handlers without reconnecting.
@@ -123,21 +126,48 @@ export function useLiveSession({
     }
 
     // Barge-in: the user spoke over the model — drop queued speech.
-    if (msg.serverContent?.interrupted) playerRef.current?.clear();
+    if (msg.serverContent?.interrupted) {
+      // [live] DIAGNOSTIC: a barge-in here cancels the turn; if it lands before
+      // the model emits its toolCall, add_to_cart is silently dropped. The
+      // partial text shows how far the spoken confirmation got before the cut.
+      console.warn(
+        `[live] interrupted (partial="${turnTextRef.current}")`,
+      );
+      playerRef.current?.clear();
+    }
 
     // Assistant transcript for the on-screen caption.
     const out = msg.serverContent?.outputTranscription?.text;
     if (out) {
+      turnTextRef.current += out;
       setCaption((prev) => {
         const merged = (prev + out).slice(-140);
         return merged;
       });
     }
-    if (msg.serverContent?.turnComplete) setCaption('');
+    if (msg.serverContent?.turnComplete) {
+      console.info(`[live] turnComplete (text="${turnTextRef.current}")`);
+      turnTextRef.current = '';
+      setCaption('');
+    }
+
+    // [live] DIAGNOSTIC: the server withdrew already-issued tool calls (happens
+    // when a turn is interrupted after toolCall but before we respond). Seeing
+    // this alongside an empty cart confirms the interrupt-drops-the-call theory.
+    const cancelIds = (
+      msg as { toolCallCancellation?: { ids?: string[] } }
+    ).toolCallCancellation?.ids;
+    if (cancelIds && cancelIds.length) {
+      console.warn('[live] toolCallCancellation', cancelIds);
+    }
 
     // Tool calls: run each handler and return the results together.
     const calls = msg.toolCall?.functionCalls;
     if (calls && calls.length) {
+      console.info(
+        '[live] toolCall',
+        calls.map((c) => ({ name: c.name, args: c.args })),
+      );
       void (async () => {
         const responses: FunctionResponse[] = [];
         for (const c of calls) {
@@ -155,6 +185,10 @@ export function useLiveSession({
           }
           responses.push({ id: c.id, name, response });
         }
+        console.info(
+          '[live] tool responses',
+          responses.map((r) => ({ name: r.name, response: r.response })),
+        );
         sessionRef.current?.sendToolResponse({ functionResponses: responses });
       })();
     }
@@ -165,6 +199,7 @@ export function useLiveSession({
     setStatus('connecting');
     setError(null);
     setCaption('');
+    turnTextRef.current = '';
     closingRef.current = false;
     if (lastFrameRef) lastFrameRef.current = null;
 
