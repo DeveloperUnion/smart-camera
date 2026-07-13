@@ -11,9 +11,9 @@ const MAX_ITEMS = 30;
 // Primary/fallback pair mirrors the dustalk ImageModel service: when the
 // primary returns 503 UNAVAILABLE we silently fail over to a smaller GA
 // model that has spare capacity. Override either via env for experiments.
-const PRIMARY_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+const PRIMARY_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
 const FALLBACK_MODEL =
-  process.env.GEMINI_FALLBACK_MODEL || 'gemini-2.5-flash-lite';
+  process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.1-flash-lite';
 
 // Transient errors from Gemini (mostly 503/UNAVAILABLE, occasionally 429)
 // retry-with-backoff first; if every retry on the primary still fails the
