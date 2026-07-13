@@ -72,15 +72,59 @@ function b64ToFloat(b64: string): Float32Array {
   return f;
 }
 
+// Streaming linear resampler. iOS Safari commonly IGNORES the requested 16 kHz
+// AudioContext rate and runs the mic at 48 kHz; sending that PCM labeled at its
+// true rate still confuses Gemini Live (which expects 16 kHz), so the model
+// hears nothing intelligible and never responds. Resampling to a fixed 16 kHz
+// here makes input correct regardless of the context's actual rate. State (the
+// fractional read position + previous buffer's last sample) carries across
+// frames so back-to-back chunks join without clicks. Passthrough when rates
+// already match (Android/desktop that honor the request).
+class LinearResampler {
+  private ratio: number;
+  private pos = 0; // fractional read position in the current buffer's coords
+  private last = 0; // previous buffer's final sample (virtual index -1)
+  private passthrough: boolean;
+
+  constructor(inRate: number, outRate: number) {
+    this.ratio = inRate / outRate;
+    this.passthrough = Math.abs(inRate - outRate) < 1;
+  }
+
+  process(input: Float32Array): Float32Array {
+    if (this.passthrough || input.length === 0) return input;
+    const n = input.length;
+    const out: number[] = [];
+    let pos = this.pos;
+    while (pos < n - 1) {
+      const i = Math.floor(pos);
+      const frac = pos - i;
+      const a = i < 0 ? this.last : input[i];
+      const b = input[i + 1];
+      out.push(a + (b - a) * frac);
+      pos += this.ratio;
+    }
+    this.pos = pos - n; // carry position into the next buffer's frame
+    this.last = input[n - 1];
+    return Float32Array.from(out);
+  }
+}
+
 export class MicRecorder {
   private ctx: AudioContext | null = null;
   private stream: MediaStream | null = null;
   private node: AudioWorkletNode | null = null;
+  private inRate = RECORD_RATE;
+  private resampler: LinearResampler | null = null;
 
   // Resolves once the mic is live and chunks are flowing to `onChunk`.
   async start(onChunk: (b64: string) => void): Promise<void> {
     const ctx = makeContext(RECORD_RATE);
     this.ctx = ctx;
+    // The context may not honor RECORD_RATE (notably iOS) — resample its actual
+    // rate down to the 16 kHz Gemini Live expects before sending.
+    this.inRate = ctx.sampleRate;
+    this.resampler = new LinearResampler(ctx.sampleRate, RECORD_RATE);
 
     const url = URL.createObjectURL(
       new Blob([WORKLET_SRC], { type: 'application/javascript' }),
@@ -98,7 +142,10 @@ export class MicRecorder {
 
     const src = ctx.createMediaStreamSource(stream);
     const node = new AudioWorkletNode(ctx, 'pcm-recorder');
-    node.port.onmessage = (e) => onChunk(floatToB64(e.data as Float32Array));
+    node.port.onmessage = (e) => {
+      const resampled = this.resampler!.process(e.data as Float32Array);
+      if (resampled.length) onChunk(floatToB64(resampled));
+    };
     src.connect(node);
     // The worklet produces no audible output, but the graph must reach the
     // destination for `process()` to be pulled — route through a muted gain.
@@ -110,8 +157,15 @@ export class MicRecorder {
     if (ctx.state === 'suspended') await ctx.resume();
   }
 
+  // Output rate of the base64 chunks (post-resample) — always 16 kHz, so the
+  // caller's `audio/pcm;rate=...` header stays truthful about what it sends.
   get sampleRate(): number {
-    return this.ctx?.sampleRate ?? RECORD_RATE;
+    return RECORD_RATE;
+  }
+
+  // Actual mic/AudioContext rate before resampling — diagnostics only.
+  get inputRate(): number {
+    return this.inRate;
   }
 
   stop(): void {

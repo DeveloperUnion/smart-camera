@@ -11,9 +11,11 @@ import { captureFrameJpeg } from '../captureSnapshot';
 
 export type LiveStatus = 'idle' | 'connecting' | 'active' | 'error';
 
-// The last video frame actually SENT to the Live session. The model's
-// add_to_cart decisions are grounded in this image, so cropping from it (not a
-// freshly captured frame) keeps model perception and crop source consistent.
+// A higher-res JPEG of the same instant as the frame last SENT to the Live
+// session. The model grounds its box_2d on the (downscaled) sent frame, but
+// box_2d is normalized so it maps onto this sharper copy — cropping from it
+// keeps model perception and crop source consistent while yielding a crisp
+// thumbnail.
 export type RetainedFrame = { data: string; ts: number };
 
 // One (ephemeral token, locked model) pair from /api/live-token, tried in order.
@@ -328,6 +330,9 @@ export function useLiveSession({
         });
       });
       recRef.current = rec;
+      // [live] DIAGNOSTIC: if in != 16000 the AudioContext ignored our request
+      // (common on iOS) — the resampler now handles it, out must read 16000.
+      console.info(`[live] mic in=${rec.inputRate}Hz out=${rec.sampleRate}Hz`);
 
       // ~1fps full-frame video as visual context.
       if (frameIntervalMs > 0) {
@@ -339,7 +344,14 @@ export function useLiveSession({
             const jpeg = captureFrameJpeg(v);
             s.sendRealtimeInput({ video: { data: jpeg, mimeType: 'image/jpeg' } });
             if (lastFrameRef) {
-              lastFrameRef.current = { data: jpeg, ts: Date.now() };
+              // Retain a higher-res copy of the SAME instant for crisp crops.
+              // box_2d is normalized (0-1000), so it maps to any resolution of
+              // the same framing; the model still grounds on the 720px frame
+              // sent above, but add_to_cart crops from this sharper one.
+              lastFrameRef.current = {
+                data: captureFrameJpeg(v, 1280),
+                ts: Date.now(),
+              };
             }
           } catch {
             // video not ready yet — skip this tick
