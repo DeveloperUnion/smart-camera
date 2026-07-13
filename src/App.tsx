@@ -8,6 +8,7 @@ import { CartView } from './cart/CartView';
 import { useLiveSession } from './live/useLiveSession';
 import type { RetainedFrame } from './live/useLiveSession';
 import { createCartHandlers } from './live/cartTools';
+import { DebugLogPanel } from './live/DebugLogPanel';
 import type { CartEntry, RefinedItem, TrackedBox } from './types';
 import './App.css';
 
@@ -343,6 +344,8 @@ export default function App() {
           onReset={handleReset}
         />
       )}
+
+      <DebugLogPanel />
     </div>
   );
 }
