@@ -1,7 +1,6 @@
 import type { CartEntry } from '../types';
 import type { RetainedFrame, ToolHandler } from './useLiveSession';
-import { captureFrameJpeg, cropJpegBase64 } from '../captureSnapshot';
-import type { NormBox } from '../captureSnapshot';
+import { captureFrameJpeg } from '../captureSnapshot';
 
 // Voice-mode cart tool HANDLERS (browser side). The matching tool declarations
 // and the system prompt live server-side in api/live-token.ts, because they
@@ -52,28 +51,25 @@ export function createCartHandlers({
       const note = args.note ? String(args.note) : undefined;
       const position = args.position ? String(args.position) : undefined;
 
-      // Read the frame ONCE up front so a concurrent stop/teardown (which
-      // nulls the ref) can't pull it out from under the crop below.
-      const frame = getLastFrame();
-      let snap: { data: string; innerBox: NormBox } | null = null;
-      if (frame) {
+      // The bbox is no longer determined here: capture a FULL frame of the
+      // moment and let /api/refine-items locate the named object within it (it
+      // gets a clean, non-stale frame + the spoken name, so its grounding beats
+      // the Live model's box_2d). Prefer a fresh live capture over the last
+      // frame SENT to the session, which can be ~1s stale.
+      let full: string | undefined;
+      const v = getVideoEl();
+      if (v) {
         try {
-          snap = await cropJpegBase64(frame.data, args.box_2d);
+          full = captureFrameJpeg(v, 1024);
         } catch {
-          snap = null; // decode failed — fall through to the full frame
+          // camera not ready — fall through to the last sent frame
         }
-        // Missing/invalid box_2d → keep the full retained frame uncropped.
-        if (!snap) snap = { data: frame.data, innerBox: [0, 0, 1, 1] };
-      } else {
-        // No frame sent yet — best effort: capture the current camera image.
-        const v = getVideoEl();
-        if (v) {
-          try {
-            snap = { data: captureFrameJpeg(v), innerBox: [0, 0, 1, 1] };
-          } catch {
-            // camera not ready either — add without a snapshot, as before
-          }
-        }
+      }
+      if (!full) {
+        // No live capture — best effort: reuse the last frame sent to Live.
+        // Read it ONCE so a concurrent stop/teardown (which nulls the ref)
+        // can't pull it out from under us.
+        full = getLastFrame()?.data;
       }
 
       const cur = getCart();
@@ -83,11 +79,13 @@ export function createCartHandlers({
       const newEntries: CartEntry[] = [];
       for (let i = 0; i < toAdd; i++) {
         // count > 1 shares one snapshot: same string reference, no extra memory.
+        // The full frame stays uncropped ([0,0,1,1]) until refine-items returns
+        // a box_2d for it; App then crops the thumbnail client-side.
         newEntries.push({
           instance_id: nextVoiceId(),
           yolo_label: name,
-          snapshot_b64: snap?.data,
-          snapshot_bbox: snap?.innerBox ?? [0, 0, 1, 1],
+          snapshot_b64: full,
+          snapshot_bbox: [0, 0, 1, 1],
           source: 'voice',
           note,
           position,

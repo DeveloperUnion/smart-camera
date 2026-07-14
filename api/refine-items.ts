@@ -40,6 +40,10 @@ type IncomingItem = {
   image_b64: string;
   image_mime?: string;
   bbox: [number, number, number, number]; // 0-1 normalized
+  // How the item was selected. 'tap' (default) → image is a pre-cropped object,
+  // identify only. 'voice' → image is a FULL frame; locate the named object and
+  // return its box_2d in addition to identifying it (the client then crops).
+  source?: 'tap' | 'voice';
 };
 
 // Prompt deliberately mirrors the ImageModel waste-disposal pipeline so
@@ -50,7 +54,11 @@ type IncomingItem = {
 // here the user has already pointed at one object per image, so we drop
 // the box requirement and just identify what was selected.
 const PROMPT_PREAMBLE = [
-  '以下の画像はユーザーがライブカメラから選択した、捨てる対象になりうる物体です。各画像で bbox 領域 (画像上の正規化 xyxy 座標、0-1 スケール) を中心に映る物体を 1 つ同定してください。家具 (机、椅子、棚など)・家電・オフィス機器・生活用品が主な対象。壁・床・天井など建物の構造部分は対象外。',
+  '以下の画像はユーザーがライブカメラから選択した、捨てる対象になりうる物体です。家具 (机、椅子、棚など)・家電・オフィス機器・生活用品が主な対象。壁・床・天井など建物の構造部分は対象外。',
+  '',
+  '各画像には 2 種類あります。画像ごとの指示に必ず従ってください:',
+  '- 「切り抜き済み」の画像: bbox 領域 (画像上の正規化 xyxy 座標、0-1 スケール) を中心に映る物体を 1 つ同定する。box_2d は返さなくてよい。',
+  '- 「フレーム全体」の画像: 画面全体が写っており、ユーザーが指した対象名 (target) が併記されます。その物体を画像内で 1 つ特定し、その位置を box_2d=[ymin, xmin, ymax, xmax] (画像全体を 0〜1000 とする正規化整数) で返し、同時に同定する。',
   '',
   '同定方針:',
   '- 物体の一部 (ボタン配列、受話器、脚など) しか写っていなくても、形状や文脈から確信を持って種類を特定できる場合は同定してください。',
@@ -88,6 +96,12 @@ const RESPONSE_SCHEMA = {
         type: Type.OBJECT,
         properties: {
           id: { type: Type.INTEGER },
+          box_2d: {
+            type: Type.ARRAY,
+            items: { type: Type.INTEGER },
+            description:
+              '「フレーム全体」の画像のときのみ、対象物体の位置 [ymin, xmin, ymax, xmax]（画像全体を 0〜1000 とする正規化整数）。「切り抜き済み」の画像では省略する。',
+          },
           refined: {
             type: Type.OBJECT,
             properties: {
@@ -232,9 +246,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // order alone.
   const parts: Part[] = [{ text: PROMPT_PREAMBLE }];
   for (const it of items) {
-    parts.push({
-      text: `id=${it.id}, yolo_label="${it.yolo_label}", bbox=${fmtBbox(it.bbox)}`,
-    });
+    const desc =
+      it.source === 'voice'
+        ? `id=${it.id}, フレーム全体, target="${it.yolo_label}" — この物体を特定して box_2d を返し同定する`
+        : `id=${it.id}, 切り抜き済み, yolo_label="${it.yolo_label}", bbox=${fmtBbox(it.bbox)}`;
+    parts.push({ text: desc });
     parts.push({
       inlineData: {
         data: it.image_b64,
@@ -249,6 +265,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const parsed = JSON.parse(text) as {
       items?: Array<{
         id: number;
+        box_2d?: unknown;
         refined?: {
           name?: string;
           description?: string;
@@ -283,7 +300,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           const v = refined[k];
           if (typeof v === 'string' && v.length > 0) trimmed[k] = v;
         }
-        return { id: r.id, refined: trimmed };
+        // Pass through box_2d only when it's a clean 4-number array (voice
+        // items). The client crops the full frame with it; tap items omit it.
+        const box = r.box_2d;
+        const box_2d =
+          Array.isArray(box) &&
+          box.length === 4 &&
+          box.every((n) => typeof n === 'number' && Number.isFinite(n))
+            ? (box as [number, number, number, number])
+            : undefined;
+        return box_2d
+          ? { id: r.id, refined: trimmed, box_2d }
+          : { id: r.id, refined: trimmed };
       });
 
     res.status(200).json({ items: out });

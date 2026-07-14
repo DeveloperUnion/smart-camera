@@ -7,6 +7,7 @@ import type {
   Session,
 } from '@google/genai';
 import { MicRecorder, AudioPlayer } from './audio';
+import { dlog } from './debugLog';
 import { captureFrameJpeg } from '../captureSnapshot';
 
 export type LiveStatus = 'idle' | 'connecting' | 'active' | 'error';
@@ -112,6 +113,7 @@ export function useLiveSession({
   }, [lastFrameRef]);
 
   const stop = useCallback(() => {
+    dlog('stop');
     teardown();
     setCaption('');
     setStatus('idle');
@@ -132,9 +134,7 @@ export function useLiveSession({
       // [live] DIAGNOSTIC: a barge-in here cancels the turn; if it lands before
       // the model emits its toolCall, add_to_cart is silently dropped. The
       // partial text shows how far the spoken confirmation got before the cut.
-      console.warn(
-        `[live] interrupted (partial="${turnTextRef.current}")`,
-      );
+      dlog(`interrupted (partial="${turnTextRef.current}")`);
       playerRef.current?.clear();
     }
 
@@ -148,7 +148,7 @@ export function useLiveSession({
       });
     }
     if (msg.serverContent?.turnComplete) {
-      console.info(`[live] turnComplete (text="${turnTextRef.current}")`);
+      dlog(`turnComplete (text="${turnTextRef.current}")`);
       turnTextRef.current = '';
       setCaption('');
     }
@@ -160,15 +160,14 @@ export function useLiveSession({
       msg as { toolCallCancellation?: { ids?: string[] } }
     ).toolCallCancellation?.ids;
     if (cancelIds && cancelIds.length) {
-      console.warn('[live] toolCallCancellation', cancelIds);
+      dlog(`toolCallCancellation ${JSON.stringify(cancelIds)}`);
     }
 
     // Tool calls: run each handler and return the results together.
     const calls = msg.toolCall?.functionCalls;
     if (calls && calls.length) {
-      console.info(
-        '[live] toolCall',
-        calls.map((c) => ({ name: c.name, args: c.args })),
+      dlog(
+        `toolCall ${JSON.stringify(calls.map((c) => ({ name: c.name, args: c.args })))}`,
       );
       void (async () => {
         const responses: FunctionResponse[] = [];
@@ -187,9 +186,8 @@ export function useLiveSession({
           }
           responses.push({ id: c.id, name, response });
         }
-        console.info(
-          '[live] tool responses',
-          responses.map((r) => ({ name: r.name, response: r.response })),
+        dlog(
+          `tool responses ${JSON.stringify(responses.map((r) => ({ name: r.name, response: r.response })))}`,
         );
         sessionRef.current?.sendToolResponse({ functionResponses: responses });
       })();
@@ -198,6 +196,7 @@ export function useLiveSession({
 
   const start = useCallback(async () => {
     if (sessionRef.current) return;
+    dlog('start');
     setStatus('connecting');
     setError(null);
     setCaption('');
@@ -276,14 +275,14 @@ export function useLiveSession({
                   if (settled) handleMessage(msg);
                 },
                 onerror: (e: ErrorEvent) => {
-                  console.error('live onerror', e);
+                  dlog(`onerror ${e?.message || 'live error'}`);
                   if (!settled) return fail(new Error(e.message || 'live error'));
                   setError(e.message || 'Live セッションエラー');
                   setStatus('error');
                   teardown();
                 },
                 onclose: (e: CloseEvent) => {
-                  console.warn('live onclose', e?.code, e?.reason);
+                  dlog(`onclose code=${e?.code ?? '?'} reason=${e?.reason ?? ''}`);
                   const why = e?.reason || `コード ${e?.code ?? '?'}`;
                   if (!settled) return fail(new Error(why));
                   if (closingRef.current) {
@@ -310,12 +309,11 @@ export function useLiveSession({
       for (const attempt of attempts) {
         try {
           session = await connectAttempt(attempt);
+          dlog(`connected model=${attempt.model}`);
           break;
         } catch (err) {
           lastErr = err instanceof Error ? err : new Error(String(err));
-          console.warn(
-            `live: model "${attempt.model}" failed: ${lastErr.message}`,
-          );
+          dlog(`model "${attempt.model}" failed: ${lastErr.message}`);
         }
       }
       if (!session) throw lastErr ?? new Error('接続に失敗しました');
@@ -332,7 +330,7 @@ export function useLiveSession({
       recRef.current = rec;
       // [live] DIAGNOSTIC: if in != 16000 the AudioContext ignored our request
       // (common on iOS) — the resampler now handles it, out must read 16000.
-      console.info(`[live] mic in=${rec.inputRate}Hz out=${rec.sampleRate}Hz`);
+      dlog(`mic in=${rec.inputRate}Hz out=${rec.sampleRate}Hz`);
 
       // ~1fps full-frame video as visual context.
       if (frameIntervalMs > 0) {
