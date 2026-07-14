@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useCamera } from './useCamera';
 import { useLocalDetector } from './useLocalDetector';
-import { captureBoxCropJpeg, captureFrameJpeg } from './captureSnapshot';
+import {
+  captureBoxCropJpeg,
+  captureFrameJpeg,
+  cropJpegBase64,
+} from './captureSnapshot';
 import { Button } from './ui/Button';
 import { DetectOverlay } from './live/DetectOverlay';
 import { CartView } from './cart/CartView';
@@ -171,6 +175,7 @@ export default function App() {
             image_b64: e.snapshot_b64,
             image_mime: 'image/jpeg',
             bbox: e.snapshot_bbox,
+            source: e.source,
           })),
         }),
       });
@@ -182,8 +187,32 @@ export default function App() {
         throw new Error(body?.error || `HTTP ${res.status}`);
       }
       const data = (await res.json()) as {
-        items?: Array<{ id: number; refined: RefinedItem }>;
+        items?: Array<{
+          id: number;
+          refined: RefinedItem;
+          box_2d?: [number, number, number, number];
+        }>;
       };
+      // Voice items were sent as full frames; the server returns box_2d for the
+      // named object, so crop the thumbnail here (bbox responsibility moved from
+      // Live to this "解析" step). Do all async crops up front, then setCart once.
+      const crops = new Map<
+        number,
+        { data: string; innerBox: [number, number, number, number] }
+      >();
+      await Promise.all(
+        (data.items ?? []).map(async (r) => {
+          if (!r.box_2d) return;
+          const cur = cartRef.current.get(r.id);
+          if (!cur?.snapshot_b64) return;
+          try {
+            const c = await cropJpegBase64(cur.snapshot_b64, r.box_2d);
+            if (c) crops.set(r.id, c);
+          } catch {
+            // decode/crop failed — keep the full frame as the thumbnail
+          }
+        }),
+      );
       // Snapshots are kept (not cleared) — the cart screen shows them as
       // thumbnails for later confirmation. They're margin-cropped JPEGs, so
       // 30 of them is a few MB of base64 at most.
@@ -191,9 +220,15 @@ export default function App() {
         const next = new Map(prev);
         for (const r of data.items ?? []) {
           const cur = next.get(r.id);
-          if (cur) {
-            next.set(r.id, { ...cur, refined: r.refined });
-          }
+          if (!cur) continue;
+          const crop = crops.get(r.id);
+          next.set(r.id, {
+            ...cur,
+            refined: r.refined,
+            ...(crop
+              ? { snapshot_b64: crop.data, snapshot_bbox: crop.innerBox }
+              : {}),
+          });
         }
         return next;
       });
