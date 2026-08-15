@@ -218,6 +218,20 @@ FP32 と INT8、`/255only` と `mean/std` 正規化の 4 通りを比較:
 
 ---
 
+## 2026-07 定点調査 — DEIMv2-N 維持を確定
+
+ハイブリッド入力（タップ復活）にあたり box 表示モデルを再サーベイ（web 調査のみ、実機トライアルなし）。判断基準: bbox recall（タップ取りこぼし直結）/ INT8 ≤~5MB（iOS メモリ安全圏）/ Apache 2.0 系 / WASM 単スレ ≤~300ms/frame / 既存 I/O（`images`+`orig_target_sizes` → `labels/boxes/scores`、`src/yolo11.ts` の modelUrl 差し替えで済むか）。
+
+2026-06 調査からの差分確認結果:
+
+- **ECDet (EdgeCrafter)**: nano variant は依然なし（最小 S=10M/AP51.7、arXiv 2603.18739）。ONNX export スクリプト整備の兆しもなし
+- **RF-DETR (ICLR 2026)**: Nano で AP48.0・Apache 2.0 と数字は良いが **params 30.5M のまま**（DINOv2 backbone）→ iOS WASM 圏外の判定変わらず
+- **YOLO26**: 2026-01 リリースの N はあるが AGPL-3.0 のまま → ライセンス面で見送り継続
+- **iOS WebGPU**: onnxruntime-web の WebKit26 メモリ暴走 (microsoft/onnxruntime#26827)、yolo26n が iOS26.3 で ~500 推論後クラッシュ (#27584) いずれも未解決 → WASM 単スレ維持が正解のまま
+
+**結論: nano帯 (≤4M params / INT8 ≤5MB) に DEIMv2-N を上回る選択肢は 2026-07 時点でも存在しない。現行 DEIMv2-N を維持。** 更新条件（試行 #5 の記載）も変更なし。box recall に不満が出た場合の次手は DEIMv2-S (9.7M/AP50.9、export 手順既知) が最低リスク。
+**その次手を実機で確かめているのが上の試行 #6**（`?model=s` で A/B）。
+
 ## 候補リスト (試行待ち)
 
 優先度順:
