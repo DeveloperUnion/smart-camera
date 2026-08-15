@@ -8,6 +8,11 @@
     "skipLibCheck": true,
 
     "moduleResolution": "bundler",
+    // Functions import `./_models.ts` with the extension so the same specifier
+    // resolves under plain Node ESM (`npm run models`, local handler probes)
+    // as well as Vercel's bundler. Extensionless specifiers fail at runtime
+    // with ERR_MODULE_NOT_FOUND — the same class of failure as commit 42353ae.
+    "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",
     "noEmit": true,

@@ -6,6 +6,7 @@ import {
   type CreateAuthTokenConfig,
   type FunctionDeclaration,
 } from '@google/genai';
+import { resolve } from './_models.ts';
 
 export const config = { maxDuration: 15 };
 
@@ -99,14 +100,11 @@ const ai = apiKey
   ? new GoogleGenAI({ apiKey, httpOptions: { apiVersion: 'v1alpha' } })
   : null;
 
-// Primary/fallback Live models, mirroring the refine-items endpoint. The
-// client tries the primary first and falls back on connect failure. Override
-// either via env without a redeploy.
-const LIVE_MODEL =
-  process.env.GEMINI_LIVE_MODEL || 'gemini-3.1-flash-live-preview';
-const LIVE_FALLBACK_MODEL =
-  process.env.GEMINI_LIVE_FALLBACK_MODEL ||
-  'gemini-2.5-flash-native-audio-preview-12-2025';
+// Model names and prices live in `_models.ts` — the single file in this repo
+// allowed to spell them out (Platform/docs/decisions/002). The client tries the
+// primary first and falls back on connect failure.
+const LIVE_MODEL = resolve('live').model;
+const LIVE_FALLBACK_MODEL = resolve('live_fallback').model;
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') {

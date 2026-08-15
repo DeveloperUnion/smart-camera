@@ -187,6 +187,19 @@ box 品質を理由にした格上げ目的は達成。これ以上 (DEIMv2-S = 
 
 **結論: nano帯 (≤4M params / INT8 ≤5MB) に DEIMv2-N を上回る選択肢は 2026-07 時点でも存在しない。現行 DEIMv2-N を維持。** 更新条件（試行 #5 の記載）も変更なし。box recall に不満が出た場合の次手は DEIMv2-S (9.7M/AP50.9、export 手順既知) が最低リスク。
 
+## 2026-08-15 定点調査 — DEIMv2-N 維持（変更なし）
+
+Gemini 3.7 への移行に合わせて再サーベイ（web 調査のみ、実機トライアルなし）。判断基準は 2026-07 と同じ。
+
+- **DEIMv2 (現行)**: HuggingFace の `Intellindust/DEIMv2_HGNetv2_{ATTO,FEMTO,PICO,N}_COCO` は **2025-10-29 以降更新なし**。N = 3.6M / AP 43.0 のまま。上流の最新ニュースは 2026-08-13 の「Intel® Geti への統合」で、モデル自体の更新ではない
+- **ECDet (EdgeCrafter)**: HF に公開されているのは **ECDet/ECSeg/ECPose の S/M/L/X のみ**（最終更新 2026-03-30）。**nano 帯は 2026-08 時点でも存在しない**。ECDet-S は 10M/AP51.7 で DEIMv2-S・RT-DETRv4-S を上回るが、我々のサイズ制約の外
+- **RF-DETR (ICLR 2026)**: Nano 30.5M / AP 48.0 のまま。D-FINE-Nano・LW-DETR-Tiny を 5AP 以上引き離すという主張は変わらないが、**params が桁で違う**ので iOS WASM 圏外の判定は不変
+- **YOLO26-N**: AGPL-3.0 のまま。ライセンス面で見送り継続
+- **iOS WebGPU**: 前回「未解決」とした 2 件は**いずれもクローズされたが、修正ではなく stale bot の自動クローズ**（#27584 が 2026-06-17、#26827 が 2026-07-18。最終コメントはどちらも bot で、修正コミットやリリースへの言及なし）。**直っていないので WASM 単スレ維持**。issue が閉じたことを「解決した」と読み違えないこと
+- **onnxruntime-web**: latest は 1.27.0（手元は 1.25.1）。上げても上記の状況は変わらない
+
+**結論: 2026-08-15 時点でも DEIMv2-N を置き換える候補はない。維持。** 次に見るタイミングは (a) DEIMv2 か EdgeCrafter が nano 帯の重みを出す、(b) onnxruntime の iOS WebGPU 問題に**実際の修正 PR** が入る、のいずれか。
+
 ## 候補リスト (試行待ち)
 
 優先度順:

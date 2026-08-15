@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { GoogleGenAI, Type } from '@google/genai';
+import { resolve } from './_models.ts';
 
 export const config = { maxDuration: 60 };
 
@@ -8,12 +9,11 @@ const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 
 const MAX_ITEMS = 30;
 
-// Primary/fallback pair mirrors the dustalk ImageModel service: when the
-// primary returns 503 UNAVAILABLE we silently fail over to a smaller GA
-// model that has spare capacity. Override either via env for experiments.
-const PRIMARY_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
-const FALLBACK_MODEL =
-  process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.1-flash-lite';
+// Model names, prices and thinking level live in `_models.ts` — the single file
+// in this repo allowed to spell them out (Platform/docs/decisions/002).
+// The primary is tried first; the fallback is the 503 UNAVAILABLE escape hatch.
+const PRIMARY = resolve('refine');
+const FALLBACK = resolve('refine_fallback');
 
 // Transient errors from Gemini (mostly 503/UNAVAILABLE, occasionally 429)
 // retry-with-backoff first; if every retry on the primary still fails the
@@ -166,13 +166,14 @@ type Part =
 async function callGeminiWithFallback(
   parts: Part[],
 ): Promise<{ text: string; modelUsed: string }> {
-  const models = [PRIMARY_MODEL, FALLBACK_MODEL].filter(
-    (m, i, a) => m && a.indexOf(m) === i,
+  const specs = [PRIMARY, FALLBACK].filter(
+    (s, i, a) => s.model && a.findIndex((x) => x.model === s.model) === i,
   );
   const backoffs = [500, 1500, 4000];
   let lastErr: unknown;
 
-  for (const model of models) {
+  for (const spec of specs) {
+    const model = spec.model;
     for (let attempt = 0; attempt < backoffs.length; attempt++) {
       try {
         const response = await ai!.models.generateContent({
@@ -181,11 +182,21 @@ async function callGeminiWithFallback(
           config: {
             responseMimeType: 'application/json',
             responseSchema: RESPONSE_SCHEMA,
+            ...(spec.thinking
+              ? { thinkingConfig: { thinkingLevel: spec.thinking } }
+              : {}),
           },
         });
-        if (model !== PRIMARY_MODEL) {
+        if (spec.task !== PRIMARY.task) {
           console.info('refine-items: used fallback model', model);
         }
+        // Token usage goes to the function log so per-session cost can be
+        // calibrated from real traffic instead of estimates. Thinking tokens
+        // are billed as OUTPUT, so they're logged separately from `out`.
+        const u = response.usageMetadata;
+        console.info(
+          `refine-items: model=${model} in=${u?.promptTokenCount ?? '?'} out=${u?.candidatesTokenCount ?? '?'} thought=${u?.thoughtsTokenCount ?? 0} total=${u?.totalTokenCount ?? '?'}`,
+        );
         return { text: response.text ?? '{"items":[]}', modelUsed: model };
       } catch (err) {
         lastErr = err;
