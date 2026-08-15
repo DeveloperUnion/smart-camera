@@ -51,9 +51,26 @@ ort.env.wasm.wasmPaths =
   'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.3/dist/';
 ort.env.wasm.numThreads = 1;
 
+// Trial #6 (iOS ceiling probe): `?model=s` loads DEIMv2-S (DINOv3 ViT-Tiny,
+// 9.7M params, COCO AP 50.9, ~11.8MB INT8) instead of the default N (3.6M,
+// AP 43.0, 4.4MB). Lets us A/B both on the same device without a redeploy —
+// we're measuring whether the ~12MB S model loads and runs without iOS
+// Safari memory-pressure kills, and whether its bboxes are visibly better.
+// Same I/O (images + orig_target_sizes → labels/boxes/scores) and same
+// /255 letterbox preprocess, so it's a pure modelUrl swap.
+function pickModelUrl(): string {
+  const variant =
+    typeof window === 'undefined'
+      ? 'n'
+      : new URLSearchParams(window.location.search).get('model');
+  return variant === 's'
+    ? '/models/deimv2_s_640_uint8.onnx'
+    : '/models/deimv2_n_640_uint8.onnx';
+}
+
 export async function loadModel(): Promise<{ backend: 'wasm' }> {
   if (session && activeBackend) return { backend: activeBackend };
-  const modelUrl = '/models/deimv2_n_640_uint8.onnx';
+  const modelUrl = pickModelUrl();
   session = await ort.InferenceSession.create(modelUrl, {
     executionProviders: ['wasm'],
     graphOptimizationLevel: 'all',
