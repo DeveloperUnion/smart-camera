@@ -29,9 +29,10 @@
 | 領域 | 採用 |
 |---|---|
 | フロント | React 19 + Vite + TypeScript |
-| ローカル推論 | YOLOv11n-COCO INT8 ONNX (80 クラス), `onnxruntime-web` WASM |
-| 詳細化 | Gemini 3 Flash (`@google/genai`, multimodal) |
-| サーバ | Vercel Serverless Function (`/api/refine-items`) |
+| ローカル推論 | DEIMv2-N INT8 ONNX @640² (ラベル非表示), `onnxruntime-web` WASM 単スレ |
+| 詳細化 | `gemini-3.7-flash` (`@google/genai`, multimodal) |
+| 音声トークモード | `gemini-3.1-flash-live-preview` (Gemini Live, native audio + 1fps 映像) |
+| サーバ | Vercel Serverless Function (`/api/refine-items`, `/api/live-token`, `/api/log`) |
 | カメラ | `getUserMedia` (`facingMode: 'environment'`) |
 | 描画 | `<video>` + `<canvas>` オーバーレイ (Canvas 2D) |
 | 物体追跡 | IoU ベース sticky `instance_id` (`LocalTracker`) |
@@ -50,16 +51,23 @@
 | 項目 | 値 |
 |---|---|
 | ローカル推論 fps | デスクトップ ~3、iOS WebKit ~1.5 (`?fps=N` で上書き) |
-| YOLO 入力解像度 | 512² (letterbox + 114-gray padding) |
-| YOLO スコア閾値 | 0.2 (`?conf=N` で上書き) |
-| NMS IoU | 0.5、class-agnostic |
+| ローカル検出 入力解像度 | 640² (letterbox + 114-gray padding) |
+| ローカル検出 スコア閾値 | 0.25 (`?conf=N` で上書き) |
+| NMS | 不要 (DETR 系。postprocess 込みで top-300 が score 降順に返る) |
 | スナップショット | 長辺 720px JPEG quality 0.8 |
 | 切り抜きマージン | box 幅/高さの 18% (各辺、フレーム内クランプ) |
 | 音声 box_2d 規約 | `[ymin, xmin, ymax, xmax]`、フレーム全体を 0-1000 とする正規化整数 (Gemini ネイティブ形式) |
 | 選択上限 | 30 個 (タップ + 音声の合算) |
-| Gemini モデル | `gemini-3-flash-preview` |
-| Gemini thinking | デフォルト (auto) |
-| Vercel Function `maxDuration` | 60 秒 |
+| Gemini モデル (詳細化) | `gemini-3.7-flash` → fallback `gemini-3.6-flash` (`GEMINI_MODEL` / `GEMINI_FALLBACK_MODEL`) |
+| Gemini thinking | `low` を明示 (`GEMINI_THINKING_LEVEL`、`auto` で未指定に戻せる) |
+| Gemini モデル (音声) | `gemini-3.1-flash-live-preview` → fallback `gemini-2.5-flash-native-audio-preview-12-2025` |
+| Live フレーム送信 | 1 fps、長辺 720px JPEG (`frameIntervalMs`) |
+| Vercel Function `maxDuration` | refine-items 60 秒 / live-token 15 秒 / log 10 秒 |
+
+モデル名・単価・思考深度の定義は `api/_models.ts` に集約されている（Dustalk の中央台帳
+`Platform/docs/models.yaml` からの写し。規約は同 `decisions/002-llm-model-definition.md`）。
+上の環境変数はローカルで別モデルを試すための上書き口で、本番値はコードの既定値。
+`npm run models` で全タスクの解決結果が出る。
 
 ## API 契約
 
@@ -126,13 +134,61 @@
 
 ## コスト目安
 
-選択 5 個程度のセッション 1 回で約 $0.005–0.015 (Gemini 3 Flash の入出力トークン換算、画像 5 枚 720px + 短いプロンプト + 構造化 JSON 出力)。30 個満載で $0.02–0.04 程度。
+単価は `gemini-3.7-flash` の導入価格 **$0.75 / $3.75 per Mtok**（2026-12-31 まで。2027-01-01 に倍）。
+
+### 詳細化 `/api/refine-items`（2026-08-15 実測）
+
+実測条件: 長辺 720px JPEG の切り抜き画像を N 枚、`thinking_level=low`（思考トークン 0）。
+
+| 選択数 | 入力 tok | 出力 tok | 1リクエスト |
+|---:|---:|---:|---:|
+| 1 | 1,911 | 100 | $0.0018 |
+| 3 | 4,150 | 273 | $0.0041 |
+| 5 | 6,439 | 416 | **$0.0064** |
+| 30（外挿） | 34,739 | 2,391 | $0.0350 |
+
+固定オーバーヘッド（プロンプト + スキーマ）約 780 tok に、画像 1 枚あたり **入力 +1,132 tok / 出力 +79 tok** が乗る。
+
+**思考深度の明示が効く**。同じ 5 枚で:
+
+| 構成 | 入力 | 出力 | 思考 | 課金出力計 | コスト | レイテンシ |
+|---|---:|---:|---:|---:|---:|---:|
+| `3.5-flash` / 未指定（移行前） | 6,439 | 416 | 1,337 | 1,753 | $0.0254 | 8.9s |
+| `3.7-flash` / 未指定 | 6,439 | 411 | 762 | 1,173 | $0.0092 | 5.4s |
+| **`3.7-flash` / `low`（採用）** | 6,439 | 416 | **0** | 416 | **$0.0064** | 4.2s |
+
+3 条件とも 5 枚すべて同定に成功し、`name` の粒度も同等。**思考トークンは出力として課金される**ため、
+未指定のままモデルだけ上げると単価半減の効果を思考トークンが食う。
+
+### 音声トークモード `/api/live-token`（試算）
+
+`gemini-3.1-flash-live-preview`。映像 1fps は **258 tok/frame**（既定解像度）で text/image レート
+$0.75/Mtok、音声は分単価（入力 $0.005/分・出力 $0.018/分）。
+
+| 内訳 | 1 分あたり |
+|---|---:|
+| 映像 1fps（15,480 tok/分） | $0.0116 |
+| 音声入力（常時） | $0.0050 |
+| 音声出力（発話が全体の 1/3 と仮定） | $0.0060 |
+| **計** | **$0.023/分** |
+
+**映像が最大のコスト要因**（音声入力の 2.3 倍）。`mediaResolution: LOW` にすると 66 tok/frame まで落ち、
+映像分が 1/4（$0.0030/分）になる。box_2d の判断は `refine-items` に移したので、Live 側の映像は
+「何が写っているか」の把握だけに使われており、下げる余地がある（未検証）。
+
+### セッション単位
+
+| 使い方 | 概算 |
+|---|---:|
+| タップのみ・5 個選択 | **$0.0064**（約 ¥1） |
+| 音声 2 分 + 5 個選択 | **$0.052**（約 ¥8） |
+| 音声 5 分 + 30 個選択 | **$0.15**（約 ¥23） |
 
 ## ローカル検出モデル
 
 **現行: DEIMv2-N (Intellindust AI Lab, Apache 2.0)、640² 入力、INT8 動的量子化 ~4.4MB** (`public/models/deimv2_n_640_uint8.onnx`)。採用経緯と試行履歴は `MODEL_TRIALS.md` を参照。DETR 系で NMS 不要、出力は postprocess 込み (`labels`/`boxes`/`scores`)。分類は信頼できないため UI ではラベル非表示・全 box「物体」扱いとし、識別は Gemini 詳細化に委ねる。
 
-**2026-07 定点調査の結論**: nano帯 (≤4M params / INT8 ≤5MB) に DEIMv2-N を上回る選択肢はなし（ECDet は最小 S=10M、RF-DETR Nano は 30.5M で iOS WASM 圏外、YOLO26-N は AGPL）。iOS の WebGPU は onnxruntime-web のメモリ問題が未解決で WASM 単スレ維持。詳細は `MODEL_TRIALS.md` の「2026-07 定点調査」節。
+**2026-08-15 定点調査の結論**: nano帯 (≤4M params / INT8 ≤5MB) に DEIMv2-N を上回る選択肢はなし（ECDet は最小 S=10M で nano 帯なし、RF-DETR Nano は 30.5M で iOS WASM 圏外、YOLO26-N は AGPL）。iOS の WebGPU は onnxruntime-web のメモリ問題が**未修正のまま**（関連 issue は stale bot に自動クローズされただけ）なので WASM 単スレ維持。詳細は `MODEL_TRIALS.md` の「2026-08-15 定点調査」節。
 
 ---
 
